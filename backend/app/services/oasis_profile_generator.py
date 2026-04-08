@@ -11,11 +11,11 @@ OASIS Agent Profile生成器
 import json
 import random
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from openai import OpenAI
+from app.utils import LLMClient
 from zep_cloud.client import Zep
 
 from ..config import Config
@@ -165,17 +165,21 @@ class OasisProfileGenerator:
         "Canada", "Australia", "Brazil", "India", "South Korea"
     ]
     
-    # 个人类型实体（需要生成具体人设）
+    # 个人类型实体（默认列表，如果没有动态识别成功则使用）
     INDIVIDUAL_ENTITY_TYPES = [
         "student", "alumni", "professor", "person", "publicfigure", 
         "expert", "faculty", "official", "journalist", "activist"
     ]
     
-    # 群体/机构类型实体（需要生成群体代表人设）
+    # 群体/机构类型实体（默认列表）
     GROUP_ENTITY_TYPES = [
         "university", "governmentagency", "organization", "ngo", 
         "mediaoutlet", "company", "institution", "group", "community"
     ]
+    
+    # 动态识别出的活跃类型
+    _active_individual_types = []
+    _active_group_types = []
     
     def __init__(
         self, 
@@ -183,18 +187,18 @@ class OasisProfileGenerator:
         base_url: Optional[str] = None,
         model_name: Optional[str] = None,
         zep_api_key: Optional[str] = None,
-        graph_id: Optional[str] = None
+        graph_id: Optional[str] = None,
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
-        self.model_name = model_name or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
-            raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
+        self.simulation_id = simulation_id
+        self.project_id = project_id
+        self.llm = LLMClient(
+            api_key=api_key or Config.LLM_API_KEY,
+            base_url=base_url or Config.LLM_BASE_URL,
+            model=model_name or Config.LLM_MODEL_NAME,
+            simulation_id=simulation_id,
+            project_id=project_id
         )
         
         # Zep客户端用于检索丰富上下文
@@ -202,29 +206,88 @@ class OasisProfileGenerator:
         self.zep_client = None
         self.graph_id = graph_id
         
+        # 模拟目标 (用于引导人设生成)
+        self.simulation_goal = None
+        
         # 仅在使用 Zep 图谱后端时启用 Zep 检索（本地 Neo4j 图谱不兼容 Zep graph_id）
         if Config.GRAPH_BACKEND == "zep" and self.zep_api_key:
             try:
                 self.zep_client = Zep(api_key=self.zep_api_key)
             except Exception as e:
                 logger.warning(f"Zep客户端初始化失败: {e}")
+
+    def identify_relevant_types(
+        self, 
+        simulation_goal: str, 
+        all_labels: List[str],
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> Dict[str, List[str]]:
+        """
+        利用LLM根据模拟目标动态识别图谱中哪些类型(Labels)应该转化为Agent。
+        """
+        if not simulation_goal or not all_labels:
+            logger.info("未提供模拟目标或图谱标签，使用默认实体类型过滤")
+            return {"individual": [], "group": []}
+            
+        logger.info(f"🧠 正在根据模拟目标进行动态标签分析...")
+        logger.info(f"🎯 模拟目标: {simulation_goal}")
+        
+        # 排除内置的基础标签
+        candidate_labels = [l for l in all_labels if l not in ["Entity", "Node"]]
+        
+        prompt = f"""你是一个社会学仿真专家。给定一个舆情模拟目标和一组来自知识图谱的实体标签，
+你需挑选出那些在模拟中应该作为“活跃社交媒体账号（Agent）”的标签。
+
+模拟目标: {simulation_goal}
+
+图谱现有的所有标签清单:
+{', '.join(candidate_labels)}
+
+请根据模拟目标，分析哪些标签对应的实体在本次模拟中具有“行动力”和“社交属性”。
+请返回有效的JSON格式，包含以下两个数组：
+1. individual: 适合作为“个人账号”的标签（如: student, journalist, official）
+2. group: 适合作为“机构/组织账号”的标签（如: university, government_agency, news_media）
+
+注意：
+- 只从提供的标签清单中选择。
+- 如果某个标签与模拟目标完全无关（如在“医疗模拟”中的“汽车零件”标签），请直接忽略。
+- 返回的JSON必须是标准的、可解析的。
+"""
+
+        try:
+            result = self.llm.chat_json(
+                messages=[
+                    {"role": "system", "content": "你是一个严谨的 JSON 专家，直接输出 JSON 结果。"},
+                    {"role": "user", "content": prompt}
+                ],
+                caller_hint="动态标签识别",
+                simulation_id=simulation_id,
+                project_id=project_id
+            )
+            
+            self._active_individual_types = [l.lower() for l in result.get("individual", [])]
+            self._active_group_types = [l.lower() for l in result.get("group", [])]
+            
+            logger.info(f"✅ 动态识别完成！")
+            logger.info(f"👤 个人类 Agent 标签: {self._active_individual_types}")
+            logger.info(f"🏢 机构类 Agent 标签: {self._active_group_types}")
+            
+            return result
+        except Exception as e:
+            logger.warning(f"动态标签识别失败，将回退到默认设置: {e}")
+            return {"individual": [], "group": []}
     
     def generate_profile_from_entity(
         self, 
         entity: EntityNode, 
         user_id: int,
-        use_llm: bool = True
+        use_llm: bool = True,
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> OasisAgentProfile:
         """
         从Zep实体生成OASIS Agent Profile
-        
-        Args:
-            entity: Zep实体节点
-            user_id: 用户ID（用于OASIS）
-            use_llm: 是否使用LLM生成详细人设
-            
-        Returns:
-            OasisAgentProfile
         """
         entity_type = entity.get_entity_type() or "Entity"
         
@@ -242,7 +305,9 @@ class OasisProfileGenerator:
                 entity_type=entity_type,
                 entity_summary=entity.summary,
                 entity_attributes=entity.attributes,
-                context=context
+                context=context,
+                simulation_id=simulation_id,
+                project_id=project_id
             )
         else:
             # 使用规则生成基础人设
@@ -253,16 +318,36 @@ class OasisProfileGenerator:
                 entity_attributes=entity.attributes
             )
         
+        # 改造 1：社会关系强耦合 (Degree Centrality)
+        # 计算连接度：关联的边越多，影响力预设越高
+        degree = len(entity.related_edges)
+        logger.info(f"📊 实体 [{name}] 连接度分析: degree={degree}")
+        
+        # 基础粉丝映射逻辑 (基础值 + 连接加权 + 随机扰动)
+        # 连接度每增加 1，平均增加 200-500 粉丝
+        base_follower = 100 + random.randint(0, 200)
+        weighted_follower = degree * random.randint(200, 500)
+        calc_follower = base_follower + weighted_follower
+        
+        # 限制最大值，避免太离谱
+        final_follower = min(calc_follower, 1000000) 
+        
+        # 好感度/威望映射
+        calc_karma = 500 + (degree * random.randint(100, 300)) + random.randint(0, 500)
+        
+        # 发布频率/状态数映射
+        calc_statuses = 100 + (degree * random.randint(20, 100)) + random.randint(0, 500)
+
         return OasisAgentProfile(
             user_id=user_id,
             user_name=user_name,
             name=name,
             bio=profile_data.get("bio", f"{entity_type}: {name}"),
             persona=profile_data.get("persona", entity.summary or f"A {entity_type} named {name}."),
-            karma=profile_data.get("karma", random.randint(500, 5000)),
-            friend_count=profile_data.get("friend_count", random.randint(50, 500)),
-            follower_count=profile_data.get("follower_count", random.randint(100, 1000)),
-            statuses_count=profile_data.get("statuses_count", random.randint(100, 2000)),
+            karma=profile_data.get("karma", calc_karma),
+            friend_count=profile_data.get("friend_count", random.randint(50, 800)),
+            follower_count=profile_data.get("follower_count", final_follower),
+            statuses_count=profile_data.get("statuses_count", calc_statuses),
             age=profile_data.get("age"),
             gender=profile_data.get("gender"),
             mbti=profile_data.get("mbti"),
@@ -491,10 +576,16 @@ class OasisProfileGenerator:
     
     def _is_individual_entity(self, entity_type: str) -> bool:
         """判断是否是个人类型实体"""
+        # 优先使用动态识别的结果
+        if self._active_individual_types:
+            return entity_type.lower() in self._active_individual_types
         return entity_type.lower() in self.INDIVIDUAL_ENTITY_TYPES
     
     def _is_group_entity(self, entity_type: str) -> bool:
         """判断是否是群体/机构类型实体"""
+        # 优先使用动态识别的结果
+        if self._active_group_types:
+            return entity_type.lower() in self._active_group_types
         return entity_type.lower() in self.GROUP_ENTITY_TYPES
     
     def _generate_profile_with_llm(
@@ -503,7 +594,9 @@ class OasisProfileGenerator:
         entity_type: str,
         entity_summary: str,
         entity_attributes: Dict[str, Any],
-        context: str
+        context: str,
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         使用LLM生成非常详细的人设
@@ -530,147 +623,37 @@ class OasisProfileGenerator:
         
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
+                result = self.llm.chat_json(
                     messages=[
                         {"role": "system", "content": self._get_system_prompt(is_individual)},
                         {"role": "user", "content": prompt}
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 每次重试降低温度
-                    # 不设置max_tokens，让LLM自由发挥
+                    temperature=0.7 - (attempt * 0.1),
+                    caller_hint=f"人设生成:{entity_name}",
+                    simulation_id=simulation_id,
+                    project_id=project_id
                 )
                 
-                content = response.choices[0].message.content
+                # 验证必需字段
+                if "bio" not in result or not result["bio"]:
+                    result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
+                if "persona" not in result or not result["persona"]:
+                    result["persona"] = entity_summary or f"{entity_name}是一个{entity_type}。"
                 
-                # 检查是否被截断（finish_reason不是'stop'）
-                finish_reason = response.choices[0].finish_reason
-                if finish_reason == 'length':
-                    logger.warning(f"LLM输出被截断 (attempt {attempt+1}), 尝试修复...")
-                    content = self._fix_truncated_json(content)
-                
-                # 尝试解析JSON
-                try:
-                    result = json.loads(content)
-                    
-                    # 验证必需字段
-                    if "bio" not in result or not result["bio"]:
-                        result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
-                    if "persona" not in result or not result["persona"]:
-                        result["persona"] = entity_summary or f"{entity_name}是一个{entity_type}。"
-                    
-                    return result
-                    
-                except json.JSONDecodeError as je:
-                    logger.warning(f"JSON解析失败 (attempt {attempt+1}): {str(je)[:80]}")
-                    
-                    # 尝试修复JSON
-                    result = self._try_fix_json(content, entity_name, entity_type, entity_summary)
-                    if result.get("_fixed"):
-                        del result["_fixed"]
-                        return result
-                    
-                    last_error = je
+                return result
                     
             except Exception as e:
-                logger.warning(f"LLM调用失败 (attempt {attempt+1}): {str(e)[:80]}")
+                logger.warning(f"LLM生成人设失败 (attempt {attempt+1}): {str(e)[:80]}")
                 last_error = e
                 import time
-                time.sleep(1 * (attempt + 1))  # 指数退避
+                time.sleep(1 * (attempt+1))
         
         logger.warning(f"LLM生成人设失败（{max_attempts}次尝试）: {last_error}, 使用规则生成")
         return self._generate_profile_rule_based(
             entity_name, entity_type, entity_summary, entity_attributes
         )
     
-    def _fix_truncated_json(self, content: str) -> str:
-        """修复被截断的JSON（输出被max_tokens限制截断）"""
-        import re
-        
-        # 如果JSON被截断，尝试闭合它
-        content = content.strip()
-        
-        # 计算未闭合的括号
-        open_braces = content.count('{') - content.count('}')
-        open_brackets = content.count('[') - content.count(']')
-        
-        # 检查是否有未闭合的字符串
-        # 简单检查：如果最后一个引号后没有逗号或闭合括号，可能是字符串被截断
-        if content and content[-1] not in '",}]':
-            # 尝试闭合字符串
-            content += '"'
-        
-        # 闭合括号
-        content += ']' * open_brackets
-        content += '}' * open_braces
-        
-        return content
-    
-    def _try_fix_json(self, content: str, entity_name: str, entity_type: str, entity_summary: str = "") -> Dict[str, Any]:
-        """尝试修复损坏的JSON"""
-        import re
-        
-        # 1. 首先尝试修复被截断的情况
-        content = self._fix_truncated_json(content)
-        
-        # 2. 尝试提取JSON部分
-        json_match = re.search(r'\{[\s\S]*\}', content)
-        if json_match:
-            json_str = json_match.group()
-            
-            # 3. 处理字符串中的换行符问题
-            # 找到所有字符串值并替换其中的换行符
-            def fix_string_newlines(match):
-                s = match.group(0)
-                # 替换字符串内的实际换行符为空格
-                s = s.replace('\n', ' ').replace('\r', ' ')
-                # 替换多余空格
-                s = re.sub(r'\s+', ' ', s)
-                return s
-            
-            # 匹配JSON字符串值
-            json_str = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', fix_string_newlines, json_str)
-            
-            # 4. 尝试解析
-            try:
-                result = json.loads(json_str)
-                result["_fixed"] = True
-                return result
-            except json.JSONDecodeError as e:
-                # 5. 如果还是失败，尝试更激进的修复
-                try:
-                    # 移除所有控制字符
-                    json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', json_str)
-                    # 替换所有连续空白
-                    json_str = re.sub(r'\s+', ' ', json_str)
-                    result = json.loads(json_str)
-                    result["_fixed"] = True
-                    return result
-                except:
-                    pass
-        
-        # 6. 尝试从内容中提取部分信息
-        bio_match = re.search(r'"bio"\s*:\s*"([^"]*)"', content)
-        persona_match = re.search(r'"persona"\s*:\s*"([^"]*)', content)  # 可能被截断
-        
-        bio = bio_match.group(1) if bio_match else (entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}")
-        persona = persona_match.group(1) if persona_match else (entity_summary or f"{entity_name}是一个{entity_type}。")
-        
-        # 如果提取到了有意义的内容，标记为已修复
-        if bio_match or persona_match:
-            logger.info(f"从损坏的JSON中提取了部分信息")
-            return {
-                "bio": bio,
-                "persona": persona,
-                "_fixed": True
-            }
-        
-        # 7. 完全失败，返回基础结构
-        logger.warning(f"JSON修复失败，返回基础结构")
-        return {
-            "bio": entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}",
-            "persona": entity_summary or f"{entity_name}是一个{entity_type}。"
-        }
+
     
     def _get_system_prompt(self, is_individual: bool) -> str:
         """获取系统提示词"""
@@ -689,8 +672,18 @@ class OasisProfileGenerator:
         
         attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "无"
         context_str = context[:3000] if context else "无额外上下文"
+        goal_str = f"\n当前模拟任务目标: {self.simulation_goal}\n" if self.simulation_goal else ""
         
-        return f"""为实体生成详细的社交媒体用户人设,最大程度还原已有现实情况。
+        # 社交地位描述
+        degree = len(entity_attributes.get("related_edges", [])) # 或者从实体对象获取
+        status_suffix = ""
+        if degree > 10:
+            status_suffix = "\n该用户在社交网络中处于核心地位，具有极高的影响力。"
+        elif degree > 5:
+            status_suffix = "\n该用户在社交网络中比较活跃，有一定的关注度。"
+            
+        return f"""为实体生成详细的社交媒体用户人设,最大程度还原已有现实情况。{goal_str}
+{status_suffix}
 
 实体名称: {entity_name}
 实体类型: {entity_type}
@@ -702,15 +695,13 @@ class OasisProfileGenerator:
 
 请生成JSON，包含以下字段:
 
-1. bio: 社交媒体简介，200字
-2. persona: 详细人设描述（2000字的纯文本），需包含:
-   - 基本信息（年龄、职业、教育背景、所在地）
-   - 人物背景（重要经历、与事件的关联、社会关系）
-   - 性格特征（MBTI类型、核心性格、情绪表达方式）
-   - 社交媒体行为（发帖频率、内容偏好、互动风格、语言特点）
-   - 立场观点（对话题的态度、可能被激怒/感动的内容）
-   - 独特特征（口头禅、特殊经历、个人爱好）
-   - 个人记忆（人设的重要部分，要介绍这个个体与事件的关联，以及这个个体在事件中的已有动作与反应）
+1. bio: 社交媒体简介（100字），用于展示在个人主页。
+2. persona: 角色行为导引（500-800字精炼文本），用于直接驱动 Agent 在模拟中的社交决策。必须包含：
+   - 【社交面具】：基于其性格和背景，在网络上呈现的核心人设（如：杠精、理中客、沉默的大多数）。
+   - 【利益/情感锚点】：明确该角色在当前事件中的核心利益点或情感触发点（他为什么在意这件事？）。
+   - 【立场律令】：规定其在互动中“必做”和“绝不做”的行为准则（如：凡看到官方贴必阴阳怪气、绝不转发未证实消息）。
+   - 【语言指纹】：3个具体的表达习惯（如：特定口头禅、爱用括号补充内心戏、常用某类 Emoji）。
+   - 【个人记忆】：简述其与该事件最深刻的关联，作为其后续言论的逻辑起点。
 3. age: 年龄数字（必须是整数）
 4. gender: 性别，必须是英文: "male" 或 "female"
 5. mbti: MBTI类型（如INTJ、ENFP等）
@@ -738,8 +729,18 @@ class OasisProfileGenerator:
         
         attrs_str = json.dumps(entity_attributes, ensure_ascii=False) if entity_attributes else "无"
         context_str = context[:3000] if context else "无额外上下文"
+        goal_str = f"\n当前模拟任务目标: {self.simulation_goal}\n" if self.simulation_goal else ""
         
-        return f"""为机构/群体实体生成详细的社交媒体账号设定,最大程度还原已有现实情况。
+        # 社交地位描述
+        degree = len(entity_attributes.get("related_edges", []))
+        status_suffix = ""
+        if degree > 10:
+            status_suffix = "\n该机构在社交网络中处于权威/核心节点，言论具有极强的公信力或传播力。"
+        elif degree > 5:
+            status_suffix = "\n该机构是该领域的重要参与者，具有较高的关注度。"
+            
+        return f"""为机构/群体实体生成详细的社交媒体账号设定,最大程度还原已有现实情况。{goal_str}
+{status_suffix}
 
 实体名称: {entity_name}
 实体类型: {entity_type}
@@ -751,17 +752,15 @@ class OasisProfileGenerator:
 
 请生成JSON，包含以下字段:
 
-1. bio: 官方账号简介，200字，专业得体
-2. persona: 详细账号设定描述（2000字的纯文本），需包含:
-   - 机构基本信息（正式名称、机构性质、成立背景、主要职能）
-   - 账号定位（账号类型、目标受众、核心功能）
-   - 发言风格（语言特点、常用表达、禁忌话题）
-   - 发布内容特点（内容类型、发布频率、活跃时间段）
-   - 立场态度（对核心话题的官方立场、面对争议的处理方式）
-   - 特殊说明（代表的群体画像、运营习惯）
-   - 机构记忆（机构人设的重要部分，要介绍这个机构与事件的关联，以及这个机构在事件中的已有动作与反应）
-3. age: 固定填30（机构账号的虚拟年龄）
-4. gender: 固定填"other"（机构账号使用other表示非个人）
+1. bio: 官方账号简介（100字），专业得体
+2. persona: 机构行为导引（500-800字精炼文本），用于直接驱动账号在模拟中的发布策略。必须包含：
+   - 【账号人设】：该机构在网络上的对外形象（如：权威发布者、亲民互动官、冷峻观察者）。
+   - 【运营底线】：规定账号在争议话题下的“必发表”和“禁区”（如：必须转发上级指令、严禁参与个人口水战）。
+   - 【发布偏好】：常用的内容类型（如：数据通报、政策解读）及发布节奏。
+   - 【话语体系】：3个具体的公文风格或专业词汇偏好（常见用词、语气倾向）。
+   - 【机构记忆】：该机构与当前事件的历史渊源及已对外界做出的承诺。
+3. age: 固定填30
+4. gender: 固定填"other"
 5. mbti: MBTI类型，用于描述账号风格，如ISTJ代表严谨保守
 6. country: 国家（使用中文，如"中国"）
 7. profession: 机构职能描述
@@ -855,26 +854,16 @@ class OasisProfileGenerator:
         self,
         entities: List[EntityNode],
         use_llm: bool = True,
-        progress_callback: Optional[callable] = None,
+        progress_callback: Optional[Callable] = None,
         graph_id: Optional[str] = None,
         parallel_count: int = 5,
         realtime_output_path: Optional[str] = None,
-        output_platform: str = "reddit"
+        output_platform: str = "reddit",
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[OasisAgentProfile]:
         """
         批量从实体生成Agent Profile（支持并行生成）
-        
-        Args:
-            entities: 实体列表
-            use_llm: 是否使用LLM生成详细人设
-            progress_callback: 进度回调函数 (current, total, message)
-            graph_id: 图谱ID，用于Zep检索获取更丰富上下文
-            parallel_count: 并行生成数量，默认5
-            realtime_output_path: 实时写入的文件路径（如果提供，每生成一个就写入一次）
-            output_platform: 输出平台格式 ("reddit" 或 "twitter")
-            
-        Returns:
-            Agent Profile列表
         """
         import concurrent.futures
         from threading import Lock
@@ -882,7 +871,7 @@ class OasisProfileGenerator:
         # 设置graph_id用于Zep检索
         if graph_id:
             self.graph_id = graph_id
-        
+            
         total = len(entities)
         profiles = [None] * total  # 预分配列表保持顺序
         completed_count = [0]  # 使用列表以便在闭包中修改
@@ -927,7 +916,9 @@ class OasisProfileGenerator:
                 profile = self.generate_profile_from_entity(
                     entity=entity,
                     user_id=idx,
-                    use_llm=use_llm
+                    use_llm=use_llm,
+                    simulation_id=simulation_id,
+                    project_id=project_id
                 )
                 
                 # 实时输出生成的人设到控制台和日志

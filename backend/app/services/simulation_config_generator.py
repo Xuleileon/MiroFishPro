@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
-from openai import OpenAI
+from app.utils import LLMClient
 
 from ..config import Config
 from ..utils.logger import get_logger
@@ -227,16 +227,10 @@ class SimulationConfigGenerator:
         base_url: Optional[str] = None,
         model_name: Optional[str] = None
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
-        self.model_name = model_name or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
-            raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
+        self.llm = LLMClient(
+            api_key=api_key or Config.LLM_API_KEY,
+            base_url=base_url or Config.LLM_BASE_URL,
+            model=model_name or Config.LLM_MODEL_NAME
         )
     
     def generate_config(
@@ -294,13 +288,24 @@ class SimulationConfigGenerator:
         # ========== 步骤1: 生成时间配置 ==========
         report_progress(1, "生成时间配置...")
         num_entities = len(entities)
-        time_config_result = self._generate_time_config(context, num_entities)
+        time_config_result = self._generate_time_config(
+            context, 
+            num_entities,
+            simulation_id=simulation_id,
+            project_id=project_id
+        )
         time_config = self._parse_time_config(time_config_result, num_entities)
         reasoning_parts.append(f"时间配置: {time_config_result.get('reasoning', '成功')}")
         
         # ========== 步骤2: 生成事件配置 ==========
         report_progress(2, "生成事件配置和热点话题...")
-        event_config_result = self._generate_event_config(context, simulation_requirement, entities)
+        event_config_result = self._generate_event_config(
+            context, 
+            simulation_requirement, 
+            entities,
+            simulation_id=simulation_id,
+            project_id=project_id
+        )
         event_config = self._parse_event_config(event_config_result)
         reasoning_parts.append(f"事件配置: {event_config_result.get('reasoning', '成功')}")
         
@@ -320,7 +325,9 @@ class SimulationConfigGenerator:
                 context=context,
                 entities=batch_entities,
                 start_idx=start_idx,
-                simulation_requirement=simulation_requirement
+                simulation_requirement=simulation_requirement,
+                simulation_id=simulation_id,
+                project_id=project_id
             )
             all_agent_configs.extend(batch_configs)
         
@@ -368,8 +375,8 @@ class SimulationConfigGenerator:
             event_config=event_config,
             twitter_config=twitter_config,
             reddit_config=reddit_config,
-            llm_model=self.model_name,
-            llm_base_url=self.base_url,
+            llm_model=self.llm.model,
+            llm_base_url=self.llm.base_url,
             generation_reasoning=" | ".join(reasoning_parts)
         )
         
@@ -430,47 +437,39 @@ class SimulationConfigGenerator:
         
         return "\n".join(lines)
     
-    def _call_llm_with_retry(self, prompt: str, system_prompt: str) -> Dict[str, Any]:
-        """带重试的LLM调用，包含JSON修复逻辑"""
-        import re
-        
+    def _call_llm_with_retry(
+        self, 
+        prompt: str, 
+        system_prompt: str,
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """带重试的LLM调用"""
         max_attempts = 3
         last_error = None
         
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
+                # 从 system_prompt 推断阶段
+                stage_hint = "配置生成"
+                if "时间" in system_prompt:
+                    stage_hint = "时间配置"
+                elif "舆论" in system_prompt or "事件" in system_prompt:
+                    stage_hint = "事件配置"
+                elif "agent" in system_prompt.lower() or "活动" in system_prompt:
+                    stage_hint = "Agent配置"
+                
+                return self.llm.chat_json(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": prompt}
                     ],
-                    response_format={"type": "json_object"},
-                    temperature=0.7 - (attempt * 0.1)  # 每次重试降低温度
-                    # 不设置max_tokens，让LLM自由发挥
+                    temperature=0.7 - (attempt * 0.1),
+                    caller_hint=stage_hint,
+                    simulation_id=simulation_id,
+                    project_id=project_id
                 )
-                
-                content = response.choices[0].message.content
-                finish_reason = response.choices[0].finish_reason
-                
-                # 检查是否被截断
-                if finish_reason == 'length':
-                    logger.warning(f"LLM输出被截断 (attempt {attempt+1})")
-                    content = self._fix_truncated_json(content)
-                
-                # 尝试解析JSON
-                try:
-                    return json.loads(content)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"JSON解析失败 (attempt {attempt+1}): {str(e)[:80]}")
-                    
-                    # 尝试修复JSON
-                    fixed = self._try_fix_config_json(content)
-                    if fixed:
-                        return fixed
-                    
-                    last_error = e
-                    
+            
             except Exception as e:
                 logger.warning(f"LLM调用失败 (attempt {attempt+1}): {str(e)[:80]}")
                 last_error = e
@@ -479,59 +478,15 @@ class SimulationConfigGenerator:
         
         raise last_error or Exception("LLM调用失败")
     
-    def _fix_truncated_json(self, content: str) -> str:
-        """修复被截断的JSON"""
-        content = content.strip()
-        
-        # 计算未闭合的括号
-        open_braces = content.count('{') - content.count('}')
-        open_brackets = content.count('[') - content.count(']')
-        
-        # 检查是否有未闭合的字符串
-        if content and content[-1] not in '",}]':
-            content += '"'
-        
-        # 闭合括号
-        content += ']' * open_brackets
-        content += '}' * open_braces
-        
-        return content
+
     
-    def _try_fix_config_json(self, content: str) -> Optional[Dict[str, Any]]:
-        """尝试修复配置JSON"""
-        import re
-        
-        # 修复被截断的情况
-        content = self._fix_truncated_json(content)
-        
-        # 提取JSON部分
-        json_match = re.search(r'\{[\s\S]*\}', content)
-        if json_match:
-            json_str = json_match.group()
-            
-            # 移除字符串中的换行符
-            def fix_string(match):
-                s = match.group(0)
-                s = s.replace('\n', ' ').replace('\r', ' ')
-                s = re.sub(r'\s+', ' ', s)
-                return s
-            
-            json_str = re.sub(r'"[^"\\]*(?:\\.[^"\\]*)*"', fix_string, json_str)
-            
-            try:
-                return json.loads(json_str)
-            except:
-                # 尝试移除所有控制字符
-                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', json_str)
-                json_str = re.sub(r'\s+', ' ', json_str)
-                try:
-                    return json.loads(json_str)
-                except:
-                    pass
-        
-        return None
-    
-    def _generate_time_config(self, context: str, num_entities: int) -> Dict[str, Any]:
+    def _generate_time_config(
+        self, 
+        context: str, 
+        num_entities: int,
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
         """生成时间配置"""
         # 使用配置的上下文截断长度
         context_truncated = context[:self.TIME_CONFIG_CONTEXT_LENGTH]
@@ -587,7 +542,12 @@ class SimulationConfigGenerator:
         system_prompt = "你是社交媒体模拟专家。返回纯JSON格式，时间配置需符合中国人作息习惯。"
         
         try:
-            return self._call_llm_with_retry(prompt, system_prompt)
+            return self._call_llm_with_retry(
+                prompt,
+                system_prompt,
+                simulation_id=simulation_id,
+                project_id=project_id
+            )
         except Exception as e:
             logger.warning(f"时间配置LLM生成失败: {e}, 使用默认配置")
             return self._get_default_time_config(num_entities)
@@ -645,7 +605,9 @@ class SimulationConfigGenerator:
         self, 
         context: str, 
         simulation_requirement: str,
-        entities: List[EntityNode]
+        entities: List[EntityNode],
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """生成事件配置"""
         
@@ -703,7 +665,12 @@ class SimulationConfigGenerator:
         system_prompt = "你是舆论分析专家。返回纯JSON格式。注意 poster_type 必须精确匹配可用实体类型。"
         
         try:
-            return self._call_llm_with_retry(prompt, system_prompt)
+            return self._call_llm_with_retry(
+                prompt,
+                system_prompt,
+                simulation_id=simulation_id,
+                project_id=project_id
+            )
         except Exception as e:
             logger.warning(f"事件配置LLM生成失败: {e}, 使用默认配置")
             return {
@@ -812,7 +779,9 @@ class SimulationConfigGenerator:
         context: str,
         entities: List[EntityNode],
         start_idx: int,
-        simulation_requirement: str
+        simulation_requirement: str,
+        simulation_id: Optional[str] = None,
+        project_id: Optional[str] = None
     ) -> List[AgentActivityConfig]:
         """分批生成Agent配置"""
         
@@ -866,7 +835,12 @@ class SimulationConfigGenerator:
         system_prompt = "你是社交媒体行为分析专家。返回纯JSON，配置需符合中国人作息习惯。"
         
         try:
-            result = self._call_llm_with_retry(prompt, system_prompt)
+            result = self._call_llm_with_retry(
+                prompt, 
+                system_prompt,
+                simulation_id=simulation_id,
+                project_id=project_id
+            )
             llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
         except Exception as e:
             logger.warning(f"Agent配置批次LLM生成失败: {e}, 使用规则生成")

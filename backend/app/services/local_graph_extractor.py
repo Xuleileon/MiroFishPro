@@ -17,12 +17,15 @@ logger = get_logger("mirofish.local_graph_extractor")
 
 
 class LocalGraphExtractor:
-    def __init__(self, llm: Optional[LLMClient] = None):
+    def __init__(self, llm: Optional[LLMClient] = None, project_id: Optional[str] = None):
+        self.project_id = project_id
         self.llm = llm or LLMClient(
             api_key=Config.EXTRACT_API_KEY,
             base_url=Config.EXTRACT_BASE_URL,
             model=Config.EXTRACT_MODEL_NAME,
+            project_id=project_id,
         )
+        self.llm.step = 'step1'
 
     @staticmethod
     def _is_data_inspection_failed(err: Exception) -> bool:
@@ -82,6 +85,8 @@ class LocalGraphExtractor:
             ],
             temperature=0.0,
             max_tokens=1536,
+            caller_hint="实体抽取(Safe)",
+            project_id=self.project_id
         )
 
     def extract(self, text: str, ontology: Dict[str, Any]) -> Dict[str, Any]:
@@ -138,6 +143,8 @@ class LocalGraphExtractor:
                 ],
                 temperature=0.2,
                 max_tokens=2048,
+                caller_hint="实体抽取",
+                project_id=self.project_id
             )
         except Exception as e:
             if self._is_data_inspection_failed(e):
@@ -148,7 +155,9 @@ class LocalGraphExtractor:
                     logger.error(f"Safe-mode extract still failed: {e2}")
                     return {"entities": [], "relations": []}
             else:
-                logger.error(f"LLM extract failed: {e}")
+                # 提取错误消息的前100个字符，避免过长
+                err_msg = str(e)[:100]
+                logger.error(f"LLM 抽取失败: {err_msg}")
                 raise
 
         entities = result.get("entities") or []

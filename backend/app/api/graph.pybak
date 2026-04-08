@@ -2,10 +2,7 @@
 图谱相关API路由
 采用项目上下文机制，服务端持久化状态
 """
-import sys
-import platform
-from datetime import datetime
-import json
+
 import os
 import traceback
 import threading
@@ -119,57 +116,6 @@ def reset_project(project_id: str):
     })
 
 
-@graph_bp.route('/project/<project_id>/usage', methods=['GET'])
-def get_project_usage(project_id: str):
-    """
-    获取项目的 Token 消耗统计 (包含项目级和全链路聚合)
-    """
-    try:
-        # 1. 获取项目的基础消耗 (针对本体生成、图谱生成等非模拟相关的损耗)
-        project_usage = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "call_count": 0,
-            "last_updated": ""
-        }
-        usage_file = os.path.join(Config.UPLOAD_FOLDER, 'projects', project_id, 'usage.json')
-        if os.path.exists(usage_file):
-            with open(usage_file, 'r', encoding='utf-8') as f:
-                try:
-                    project_usage = json.load(f)
-                except: pass
-        
-        # 1.5 提取特定环节的账单 (如果指定了 step)
-        step_id = request.args.get('step')
-        display_data = project_usage
-        if step_id:
-            if "steps" in project_usage and step_id in project_usage["steps"]:
-                display_data = project_usage["steps"][step_id]
-            else:
-                # 如果指定了环节但还没有产生账目，强行清零返回，防止返回总额导致的数值污染
-                display_data = {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                    "call_count": 0
-                }
-        
-        # 2. 获取该项目下所有模拟+项目的聚合总计
-        total_usage = ProjectManager.get_aggregated_usage(project_id)
-        
-        return jsonify({
-            "success": True,
-            "data": display_data,  # 环节数据 (可能为分账数据)
-            "total": total_usage    # 项目总计数据
-        })
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"获取 Token 用量失败: {str(e)}"
-        }), 500
-
-
 # ============== 接口1：上传文件并生成本体 ==============
 
 @graph_bp.route('/ontology/generate', methods=['POST'])
@@ -267,7 +213,7 @@ def generate_ontology():
         
         # 生成本体
         logger.info("调用 LLM 生成本体定义...")
-        generator = OntologyGenerator(project_id=project.project_id)
+        generator = OntologyGenerator()
         ontology = generator.generate(
             document_texts=document_texts,
             simulation_requirement=simulation_requirement,
@@ -301,45 +247,10 @@ def generate_ontology():
         })
         
     except Exception as e:
-            # 获取完整异常信息
-        exc_type = type(e).__name__
-        exc_msg = str(e)
-        exc_tb = traceback.format_exc()
-        
-        # 记录详细日志到服务器
-        logger.error(f"=== 生成本体失败 ===")
-        logger.error(f"时间: {datetime.now().isoformat()}")
-        logger.error(f"异常类型: {exc_type}")
-        logger.error(f"异常消息: {exc_msg}")
-        logger.error(f"堆栈跟踪:\n{exc_tb}")
-        logger.error(f"Python版本: {sys.version}")
-        logger.error(f"平台: {platform.platform()}")
-        
-        # 获取请求信息（脱敏）
-        req_info = {
-            "method": request.method,
-            "path": request.path,
-            "content_type": request.content_type,
-            "form_keys": list(request.form.keys()) if request.form else [],
-            "files_count": len(request.files) if request.files else 0,
-            # 注意：不要记录敏感信息如 API key
-        }
-        logger.error(f"请求信息: {req_info}")
-        
         return jsonify({
             "success": False,
-            "error": f"{exc_type}: {exc_msg}",
-            "traceback": exc_tb,  # 开发环境保留，生产环境建议移除
-            "debug": {
-                "python_version": sys.version,
-                "platform": platform.platform(),
-                "timestamp": datetime.now().isoformat(),
-                # 可选：记录请求参数摘要（脱敏）
-                "request_summary": {
-                  "has_simulation_requirement":bool(request.form.get('simulation_requirement')),
-                  "files_uploaded": len(request.files) if request.files else 0,
-                }
-            }
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }), 500
 
 
@@ -424,13 +335,6 @@ def build_graph():
         chunk_size = data.get('chunk_size', project.chunk_size or Config.DEFAULT_CHUNK_SIZE)
         chunk_overlap = data.get('chunk_overlap', project.chunk_overlap or Config.DEFAULT_CHUNK_OVERLAP)
         
-        # 增加防御性参数校验，防止死循环
-        if chunk_size <= chunk_overlap:
-            return jsonify({
-                "success": False,
-                "error": f"非法参数配置: 分片大小 ({chunk_size}) 必须大于重叠大小 ({chunk_overlap})"
-            }), 400
-            
         # 更新项目配置
         project.chunk_size = chunk_size
         project.chunk_overlap = chunk_overlap

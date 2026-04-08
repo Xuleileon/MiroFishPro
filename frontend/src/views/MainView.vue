@@ -26,10 +26,11 @@
           <span class="step-name">{{ stepNames[currentStep - 1] }}</span>
         </div>
         <div class="step-divider"></div>
-        <span class="status-indicator" :class="statusClass">
-          <span class="dot"></span>
-          {{ statusText }}
-        </span>
+          <TokenDashboard :projectId="currentProjectId" step="step1" />
+          <span class="status-indicator" :class="statusClass">
+            <span class="dot"></span>
+            {{ statusText }}
+          </span>
       </div>
     </header>
 
@@ -80,6 +81,7 @@ import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
+import TokenDashboard from '../components/TokenDashboard.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
 

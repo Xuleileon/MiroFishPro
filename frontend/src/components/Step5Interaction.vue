@@ -300,13 +300,20 @@
             <button 
               class="send-btn"
               @click="sendMessage"
-              :disabled="!chatInput.trim() || isSending || (!selectedAgent && chatTarget === 'agent')"
+              :disabled="!chatInput.trim() || isSending || (!selectedAgent && chatTarget === 'agent') || isActivatingEnv"
             >
               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="22" y1="2" x2="11" y2="13"></line>
                 <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
               </svg>
             </button>
+            <!-- 环境激活中的蒙层 -->
+            <div v-if="isActivatingEnv" class="env-loading-overlay">
+              <div class="loader-dots">
+                <span></span><span></span><span></span>
+              </div>
+              <span class="loader-text">对话系统环境正在初始化...</span>
+            </div>
           </div>
         </div>
 
@@ -416,7 +423,8 @@ import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulatio
 
 const props = defineProps({
   reportId: String,
-  simulationId: String
+  simulationId: String,
+  isActivatingEnv: Boolean
 })
 
 const emit = defineEmits(['add-log', 'update-status'])
@@ -2637,5 +2645,55 @@ watch(() => props.simulationId, (newId) => {
   border: none;
   border-top: 1px solid #E5E7EB;
   margin: 24px 0;
+}
+
+/* Environment Loading Overlay */
+.chat-input-area {
+  position: relative;
+}
+
+.env-loading-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(2px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  border-radius: 12px;
+  gap: 8px;
+}
+
+.loader-dots {
+  display: flex;
+  gap: 4px;
+}
+
+.loader-dots span {
+  width: 6px;
+  height: 6px;
+  background: #1F2937;
+  border-radius: 50%;
+  animation: dot-pulse 1.4s infinite ease-in-out both;
+}
+
+.loader-dots span:nth-child(1) { animation-delay: -0.32s; }
+.loader-dots span:nth-child(2) { animation-delay: -0.16s; }
+
+.loader-text {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4B5563;
+  letter-spacing: 0.5px;
+}
+
+@keyframes dot-pulse {
+  0%, 80%, 100% { transform: scale(0); opacity: 0.3; }
+  40% { transform: scale(1); opacity: 1; }
 }
 </style>

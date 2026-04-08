@@ -135,7 +135,9 @@ def split_text_into_chunks(
             chunks.append(chunk)
         
         # 下一个块从重叠位置开始
-        start = end - overlap if end < len(text) else len(text)
+        next_start = end - overlap if end < len(text) else len(text)
+        # 强制前移步进，防止死循环 (当 end - overlap <= start 时)
+        start = max(next_start, start + 1)
     
     return chunks
 

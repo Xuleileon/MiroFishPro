@@ -68,6 +68,9 @@ class LocalGraphBuilderService:
         """
         if progress_callback:
             progress_callback("创建本地图谱（Neo4j）...", 0.02)
+        
+        # 注入 project_id 到 extractor，确保计费追踪
+        self.extractor = LocalGraphExtractor(project_id=project_id)
 
         graph_id = self.create_graph(project_id=project_id, name=graph_name, ontology=ontology)
 

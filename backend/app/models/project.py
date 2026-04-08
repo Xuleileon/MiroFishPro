@@ -53,7 +53,10 @@ class Project:
     error: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
+        """转换为字典（包含聚合 Token 统计）"""
+        # 获取聚合后的统计数据 (项目本身 + 下属所有模拟)
+        aggregated_usage = ProjectManager.get_aggregated_usage(self.project_id)
+
         return {
             "project_id": self.project_id,
             "name": self.name,
@@ -69,7 +72,8 @@ class Project:
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
-            "error": self.error
+            "error": self.error,
+            "token_usage": aggregated_usage  # 现在返回的是聚合后的数据
         }
     
     @classmethod
@@ -302,4 +306,46 @@ class ProjectManager:
             for f in os.listdir(files_dir) 
             if os.path.isfile(os.path.join(files_dir, f))
         ]
+
+    @classmethod
+    def get_aggregated_usage(cls, project_id: str) -> Dict[str, Any]:
+        """聚合项目级和所有模拟环节的 Token 使用情况"""
+        total_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "call_count": 0,
+            "last_updated": None
+        }
+
+        # 1. 累加项目级损耗 (Step 1 & 2)
+        try:
+            usage_file = os.path.join(cls._get_project_dir(project_id), 'usage.json')
+            if os.path.exists(usage_file):
+                with open(usage_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for key in ["prompt_tokens", "completion_tokens", "total_tokens", "call_count"]:
+                        total_usage[key] += data.get(key, 0)
+                    total_usage["last_updated"] = data.get("last_updated")
+        except Exception: pass
+
+        # 2. 累加模拟级损耗 (Step 3+)
+        try:
+            from ..services.simulation_manager import SimulationManager
+            sim_manager = SimulationManager()
+            sim_list = sim_manager.list_simulations(project_id)
+            
+            for sim in sim_list:
+                sim_usage_file = os.path.join(Config.UPLOAD_FOLDER, 'simulations', sim.simulation_id, 'usage.json')
+                if os.path.exists(sim_usage_file):
+                    with open(sim_usage_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        for key in ["prompt_tokens", "completion_tokens", "total_tokens", "call_count"]:
+                            total_usage[key] += data.get(key, 0)
+                        # 更新最晚更新时间
+                        if data.get("last_updated") and (not total_usage["last_updated"] or data["last_updated"] > total_usage["last_updated"]):
+                            total_usage["last_updated"] = data["last_updated"]
+        except Exception: pass
+
+        return total_usage
 

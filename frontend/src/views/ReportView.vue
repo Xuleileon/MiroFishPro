@@ -21,6 +21,11 @@
       </div>
 
       <div class="header-right">
+        <TokenDashboard 
+          :projectId="projectData?.project_id"
+          :simulationId="simulationId" 
+          step="step4"
+        />
         <div class="workflow-step">
           <span class="step-num">Step 4/5</span>
           <span class="step-name">报告生成</span>
@@ -66,8 +71,9 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step4Report from '../components/Step4Report.vue'
+import TokenDashboard from '../components/TokenDashboard.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation } from '../api/simulation'
+import { getSimulation, getSimulationUsage } from '../api/simulation'
 import { getReport } from '../api/report'
 
 const route = useRoute()
@@ -127,6 +133,14 @@ const updateStatus = (status) => {
   currentStatus.value = status
 }
 
+// --- Token Usage Statistics ---
+const stats = ref({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  call_count: 0
+})
+
 // --- Layout Methods ---
 const toggleMaximize = (target) => {
   if (viewMode.value === target) {
@@ -139,40 +153,53 @@ const toggleMaximize = (target) => {
 // --- Data Logic ---
 const loadReportData = async () => {
   try {
-    addLog(`加载报告数据: ${currentReportId.value}`)
-    
-    // 获取 report 信息以获取 simulation_id
+    // 优先从查询参数中提前捕获 ID，实现即时计费感应
+    if (route.query.projectId) {
+      projectData.value = { project_id: route.query.projectId }
+      addLog(`从参数预加载项目 ID: ${route.query.projectId}`)
+    }
+    if (route.query.simulationId) {
+      simulationId.value = route.query.simulationId
+      addLog(`从参数预加载模拟 ID: ${route.query.simulationId}`)
+    }
+
+    // 并行获取项目详细信息 (不仅依赖报告结果)
+    const pid = route.query.projectId
+    if (pid) {
+      getProject(pid).then(projRes => {
+        if (projRes.success && projRes.data) {
+          projectData.value = projRes.data
+          if (projRes.data.graph_id) loadGraph(projRes.data.graph_id)
+        }
+      })
+    }
+
+    addLog(`正在拉取报告元数据: ${currentReportId.value}`)
+    // 获取 report 信息，即便报 404 也不应阻塞整体呈现
     const reportRes = await getReport(currentReportId.value)
-    if (reportRes.success && reportRes.data) {
-      const reportData = reportRes.data
-      simulationId.value = reportData.simulation_id
+    
+    if (reportRes && reportRes.success) {
+      simulationId.value = reportRes.data.simulation_id
       
       if (simulationId.value) {
-        // 获取 simulation 信息
         const simRes = await getSimulation(simulationId.value)
         if (simRes.success && simRes.data) {
           const simData = simRes.data
-          
-          // 获取 project 信息
-          if (simData.project_id) {
+          if (simData.project_id && !projectData.value?.name) {
             const projRes = await getProject(simData.project_id)
             if (projRes.success && projRes.data) {
               projectData.value = projRes.data
-              addLog(`项目加载成功: ${projRes.data.project_id}`)
-              
-              // 获取 graph 数据
-              if (projRes.data.graph_id) {
-                await loadGraph(projRes.data.graph_id)
-              }
+              if (projRes.data.graph_id) loadGraph(projRes.data.graph_id)
             }
           }
         }
       }
     } else {
-      addLog(`获取报告信息失败: ${reportRes.error || '未知错误'}`)
+      // 容杀 404: 如果报告获取不到（生成初期），如果是 404 则仅记录
+      addLog(`报告详情暂未就绪 (可能是生成中): ${reportRes.error || '404'}`)
     }
   } catch (err) {
-    addLog(`加载异常: ${err.message}`)
+    addLog(`初始化加载异常: ${err.message}`)
   }
 }
 

@@ -21,6 +21,11 @@
       </div>
 
       <div class="header-right">
+        <TokenDashboard 
+          :projectId="currentProjectId"
+          :simulationId="currentSimulationId" 
+          step="step3" 
+        />
         <div class="workflow-step">
           <span class="step-num">Step 3/5</span>
           <span class="step-name">开始模拟</span>
@@ -71,6 +76,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
+import TokenDashboard from '../components/TokenDashboard.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
 
@@ -95,6 +101,9 @@ const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('processing') // processing | completed | error
+
+// 获取关联的项目ID (用于增强版 TokenDashboard)
+const currentProjectId = computed(() => projectData.value?.project_id)
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -134,6 +143,14 @@ const addLog = (msg) => {
 const updateStatus = (status) => {
   currentStatus.value = status
 }
+
+// --- Token Usage Statistics ---
+const stats = ref({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  call_count: 0
+})
 
 // --- Layout Methods ---
 const toggleMaximize = (target) => {
@@ -219,24 +236,30 @@ const loadSimulationData = async () => {
         addLog(`获取时间配置失败，使用默认值: ${minutesPerRound.value}分钟/轮`)
       }
       
-      // 获取 project 信息
-      if (simData.project_id) {
-        const projRes = await getProject(simData.project_id)
-        if (projRes.success && projRes.data) {
-          projectData.value = projRes.data
-          addLog(`项目加载成功: ${projRes.data.project_id}`)
-          
-          // 获取 graph 数据
-          if (projRes.data.graph_id) {
-            await loadGraph(projRes.data.graph_id)
+      // 获取 project 信息 (隔离异常)
+      try {
+        if (simData.project_id) {
+          const projRes = await getProject(simData.project_id)
+          if (projRes.success && projRes.data) {
+            projectData.value = projRes.data
+            addLog(`项目加载成功: ${projRes.data.project_id}`)
+            
+            // 获取 graph 数据
+            if (projRes.data.graph_id) {
+              await loadGraph(projRes.data.graph_id)
+            }
+          } else {
+            addLog(`⚠ 项目加载失败 (ID: ${simData.project_id})，将继续显示模拟运行状态`)
           }
         }
+      } catch (projErr) {
+        addLog(`⚠ 项目信息同步异常: ${projErr.message}`)
       }
     } else {
       addLog(`加载模拟数据失败: ${simRes.error || '未知错误'}`)
     }
   } catch (err) {
-    addLog(`加载异常: ${err.message}`)
+    addLog(`核心数据加载异常: ${err.message}`)
   }
 }
 

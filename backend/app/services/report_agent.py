@@ -531,7 +531,10 @@ class ReportAgent:
                 api_key=Config.REPORT_API_KEY,
                 base_url=Config.REPORT_BASE_URL,
                 model=Config.REPORT_MODEL_NAME,
+                simulation_id=self.simulation_id
             )
+        # 默认计费标签设为 step4 (报告生成)
+        self.llm.step = 'step4'
         self.zep_tools = zep_tools or get_tools_service()
         
         # 工具定义
@@ -618,6 +621,7 @@ class ReportAgent:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: Optional[Dict] = None,
+        caller_hint: str = "Report生成"
     ) -> str:
         if self._moderation_safe_mode:
             return self.llm.chat(
@@ -625,6 +629,7 @@ class ReportAgent:
                 temperature=max(0.0, temperature - 0.1),
                 max_tokens=max_tokens,
                 response_format=response_format,
+                caller_hint=f"{caller_hint}(安全模式)"
             )
 
         try:
@@ -633,6 +638,7 @@ class ReportAgent:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format=response_format,
+                caller_hint=caller_hint
             )
         except Exception as e:
             if not self._is_data_inspection_failed(e):
@@ -644,6 +650,7 @@ class ReportAgent:
                 temperature=max(0.0, temperature - 0.1),
                 max_tokens=max_tokens,
                 response_format=response_format,
+                caller_hint=f"{caller_hint}(安全触发重试)"
             )
 
     def _chat_json_with_moderation_retry(
@@ -652,16 +659,23 @@ class ReportAgent:
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        caller_hint: str = "Report生成(JSON)"
     ) -> Dict[str, Any]:
         if self._moderation_safe_mode:
             return self.llm.chat_json(
                 messages=self._sanitize_messages_for_moderation(messages),
                 temperature=max(0.0, temperature - 0.1),
                 max_tokens=max_tokens,
+                caller_hint=f"{caller_hint}(安全模式)"
             )
 
         try:
-            return self.llm.chat_json(messages=messages, temperature=temperature, max_tokens=max_tokens)
+            return self.llm.chat_json(
+                messages=messages, 
+                temperature=temperature, 
+                max_tokens=max_tokens,
+                caller_hint=caller_hint
+            )
         except Exception as e:
             if not self._is_data_inspection_failed(e):
                 raise
@@ -671,6 +685,7 @@ class ReportAgent:
                 messages=self._sanitize_messages_for_moderation(messages),
                 temperature=max(0.0, temperature - 0.1),
                 max_tokens=max_tokens,
+                caller_hint=f"{caller_hint}(安全触发重试)"
             )
 
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
@@ -1043,7 +1058,8 @@ class ReportAgent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3
+                temperature=0.3,
+                caller_hint="Report大纲规划"
             )
             
             if progress_callback:
@@ -1329,7 +1345,8 @@ class ReportAgent:
             response = self._chat_with_moderation_retry(
                 messages=messages,
                 temperature=0.5,
-                max_tokens=4096
+                max_tokens=4096,
+                caller_hint=f"Report章节生成({section.title})"
             )
             
             logger.debug(f"LLM响应: {response[:200]}...")
@@ -1487,7 +1504,8 @@ class ReportAgent:
         response = self._chat_with_moderation_retry(
             messages=messages,
             temperature=0.5,
-            max_tokens=4096
+            max_tokens=4096,
+            caller_hint=f"Report章节生成(迭代兜底:{section.title})"
         )
         
         if "Final Answer:" in response:
@@ -1797,6 +1815,9 @@ class ReportAgent:
         chat_history: List[Dict[str, str]] = None,
         disable_interview: bool = False
     ) -> Dict[str, Any]:
+        """与用户对话，通过ReACT模式回答问题"""
+        # 进入交互模式，切换计费标签到 step5
+        self.llm.step = 'step5'
         """
         与Report Agent对话
         
@@ -1813,6 +1834,8 @@ class ReportAgent:
                 "sources": [信息来源]
             }
         """
+        # 进入交互模式，切换计费标签到 step5
+        self.llm.step = 'step5'
         logger.info(f"Report Agent对话: {message[:50]}...")
         
         chat_history = chat_history or []
@@ -1884,7 +1907,8 @@ class ReportAgent:
         for iteration in range(max_iterations):
             response = self._chat_with_moderation_retry(
                 messages=messages,
-                temperature=0.5
+                temperature=0.5,
+                caller_hint="Report助手对话(ReACT循环)"
             )
             
             # 解析工具调用
@@ -1924,7 +1948,8 @@ class ReportAgent:
         # 达到最大迭代，获取最终响应
         final_response = self._chat_with_moderation_retry(
             messages=messages,
-            temperature=0.5
+            temperature=0.5,
+            caller_hint="Report助手对话(最终回答)"
         )
         
         # 清理响应

@@ -21,6 +21,10 @@
       </div>
 
       <div class="header-right">
+        <TokenDashboard 
+          :projectId="projectData?.project_id"
+          :simulationId="currentSimulationId" 
+        />
         <div class="workflow-step">
           <span class="step-num">Step 2/5</span>
           <span class="step-name">环境搭建</span>
@@ -68,6 +72,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
+import TokenDashboard from '../components/TokenDashboard.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, stopSimulation, getEnvStatus, closeSimulationEnv } from '../api/simulation'
 
@@ -158,12 +163,19 @@ const handleNextStep = (params = {}) => {
   // 构建路由参数
   const routeParams = {
     name: 'SimulationRun',
-    params: { simulationId: currentSimulationId.value }
+    params: { simulationId: currentSimulationId.value },
+    query: {}
   }
   
   // 如果有自定义轮数，通过 query 参数传递
   if (params.maxRounds) {
-    routeParams.query = { maxRounds: params.maxRounds }
+    routeParams.query.maxRounds = params.maxRounds
+  }
+  
+  // 如果是续跑模式
+  if (params.resume) {
+    routeParams.query.resume = 'true'
+    addLog('准备以续跑模式启动...')
   }
   
   // 跳转到 Step 3 页面
@@ -289,8 +301,8 @@ const refreshGraph = () => {
 onMounted(async () => {
   addLog('SimulationView 初始化')
   
-  // 检查并关闭正在运行的模拟（用户从 Step 3 返回时）
-  await checkAndStopRunningSimulation()
+  // 不再默认自动关闭模拟，允许用户进入页面后选择“继续”
+  // await checkAndStopRunningSimulation()
   
   // 加载模拟数据
   loadSimulationData()

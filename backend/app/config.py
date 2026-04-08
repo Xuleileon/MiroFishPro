@@ -33,28 +33,54 @@ class Config:
     # JSON配置 - 禁用ASCII转义，让中文直接显示（而不是 \uXXXX 格式）
     JSON_AS_ASCII = False
     
+    # 日志控制 (DEBUG | INFO | WARNING | ERROR)
+    LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+    
+    # Mock LLM 模式（用于测试，避免消耗真实 Token）
+
+    USE_MOCK_LLM = os.environ.get('USE_MOCK_LLM', 'false').lower() == 'true'
+    MOCK_LLM_URL = os.environ.get('MOCK_LLM_URL', 'http://localhost:5099')
+
     # LLM配置（统一使用OpenAI格式）
-    LLM_API_KEY = os.environ.get('LLM_API_KEY')
-    LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
-    LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    if USE_MOCK_LLM:
+        LLM_API_KEY = 'mock-api-key'
+        LLM_BASE_URL = MOCK_LLM_URL
+        LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'mock-model')
+    else:
+        LLM_API_KEY = os.environ.get('LLM_API_KEY')
+        LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
+        LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
 
     # 结构化抽取 LLM（用于本体生成/实体关系抽取等 JSON 任务；默认复用 LLM 配置）
-    # 有些供应商会对“输出内容审核”更严格，导致 data_inspection_failed，可单独切换到更合适的模型/供应商。
-    EXTRACT_API_KEY = os.environ.get('EXTRACT_API_KEY') or LLM_API_KEY
-    EXTRACT_BASE_URL = os.environ.get('EXTRACT_BASE_URL') or LLM_BASE_URL
-    EXTRACT_MODEL_NAME = os.environ.get('EXTRACT_MODEL_NAME') or LLM_MODEL_NAME
+    # 有些供应商会对"输出内容审核"更严格，导致 data_inspection_failed，可单独切换到更合适的模型/供应商。
+    if USE_MOCK_LLM:
+        EXTRACT_API_KEY = LLM_API_KEY
+        EXTRACT_BASE_URL = LLM_BASE_URL
+        EXTRACT_MODEL_NAME = LLM_MODEL_NAME
+    else:
+        EXTRACT_API_KEY = os.environ.get('EXTRACT_API_KEY') or LLM_API_KEY
+        EXTRACT_BASE_URL = os.environ.get('EXTRACT_BASE_URL') or LLM_BASE_URL
+        EXTRACT_MODEL_NAME = os.environ.get('EXTRACT_MODEL_NAME') or LLM_MODEL_NAME
 
     # 报告生成LLM（默认复用 LLM 配置）
-    # 说明：部分国内供应商对“输入内容审核”更严格，报告生成时会携带模拟/检索到的原始内容，可能触发 data_inspection_failed。
-    #       可单独将报告生成切换到更合适的 OpenAI 兼容供应商/模型。
-    REPORT_API_KEY = os.environ.get('REPORT_API_KEY') or LLM_API_KEY
-    REPORT_BASE_URL = os.environ.get('REPORT_BASE_URL') or LLM_BASE_URL
-    REPORT_MODEL_NAME = os.environ.get('REPORT_MODEL_NAME') or LLM_MODEL_NAME
+    if USE_MOCK_LLM:
+        REPORT_API_KEY = LLM_API_KEY
+        REPORT_BASE_URL = LLM_BASE_URL
+        REPORT_MODEL_NAME = LLM_MODEL_NAME
+    else:
+        REPORT_API_KEY = os.environ.get('REPORT_API_KEY') or LLM_API_KEY
+        REPORT_BASE_URL = os.environ.get('REPORT_BASE_URL') or LLM_BASE_URL
+        REPORT_MODEL_NAME = os.environ.get('REPORT_MODEL_NAME') or LLM_MODEL_NAME
 
     # Embedding 配置（默认复用 LLM 配置）
-    EMBEDDING_API_KEY = os.environ.get('EMBEDDING_API_KEY') or LLM_API_KEY
-    EMBEDDING_BASE_URL = os.environ.get('EMBEDDING_BASE_URL') or LLM_BASE_URL
-    EMBEDDING_MODEL_NAME = os.environ.get('EMBEDDING_MODEL_NAME', 'text-embedding-3-small')
+    if USE_MOCK_LLM:
+        EMBEDDING_API_KEY = LLM_API_KEY
+        EMBEDDING_BASE_URL = LLM_BASE_URL
+        EMBEDDING_MODEL_NAME = 'mock-embedding'
+    else:
+        EMBEDDING_API_KEY = os.environ.get('EMBEDDING_API_KEY') or LLM_API_KEY
+        EMBEDDING_BASE_URL = os.environ.get('EMBEDDING_BASE_URL') or LLM_BASE_URL
+        EMBEDDING_MODEL_NAME = os.environ.get('EMBEDDING_MODEL_NAME', 'text-embedding-3-small')
     
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')

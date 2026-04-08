@@ -27,18 +27,37 @@ def _ensure_utf8_stdout():
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'logs')
 
 
-def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.Logger:
+def setup_logger(name: str = 'mirofish', level: int = None) -> logging.Logger:
     """
     设置日志器
     
     Args:
         name: 日志器名称
-        level: 日志级别
+        level: 日志级别（可选，不传则使用 Config.LOG_LEVEL）
         
     Returns:
         配置好的日志器
     """
+    from ..config import Config
+    
+    # 确定日志级别
+    if level is None:
+        level_map = {
+            'DEBUG': logging.DEBUG,
+            'INFO': logging.INFO,
+            'WARNING': logging.WARNING,
+            'ERROR': logging.ERROR
+        }
+        level_name = Config.LOG_LEVEL
+        level = level_map.get(level_name, logging.INFO)
+    
+    # 静默 Werkzeug 接口日志（除非是 DEBUG 级别）
+    if level > logging.DEBUG:
+        logging.getLogger('werkzeug').setLevel(logging.WARNING)
+        logging.getLogger('flask_cors').setLevel(logging.WARNING)
+    
     # 确保日志目录存在
+
     os.makedirs(LOG_DIR, exist_ok=True)
     
     # 创建日志器
@@ -78,8 +97,9 @@ def setup_logger(name: str = 'mirofish', level: int = logging.DEBUG) -> logging.
     # 确保 Windows 下使用 UTF-8 编码，避免中文乱码
     _ensure_utf8_stdout()
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(level)
     console_handler.setFormatter(simple_formatter)
+
     
     # 添加处理器
     logger.addHandler(file_handler)

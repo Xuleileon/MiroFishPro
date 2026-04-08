@@ -509,20 +509,37 @@
             </Transition>
           </div>
 
-          <div class="action-group dual">
+          <div class="action-group dual" :class="{ 'with-resume': runStatus.current_round > 0 }">
             <button 
               class="action-btn secondary"
               @click="$emit('go-back')"
             >
               ← 返回图谱构建
             </button>
-            <button 
-              class="action-btn primary"
-              :disabled="phase < 4"
-              @click="handleStartSimulation"
-            >
-              开始双世界并行模拟 ➝
-            </button>
+            
+            <template v-if="runStatus.current_round > 0">
+              <button 
+                class="action-btn warning"
+                @click="handleStartSimulation({ force_restart: true })"
+              >
+                重新开始 (R0)
+              </button>
+              <button 
+                class="action-btn primary"
+                @click="handleResumeSimulation"
+              >
+                继续运行 (R{{ runStatus.current_round }}) ➝
+              </button>
+            </template>
+            <template v-else>
+              <button 
+                class="action-btn primary"
+                :disabled="phase < 4"
+                @click="handleStartSimulation"
+              >
+                开始双世界并行模拟 ➝
+              </button>
+            </template>
           </div>
         </div>
       </div>
@@ -638,7 +655,8 @@ import {
   getPrepareStatus, 
   getSimulationProfilesRealtime,
   getSimulationConfig,
-  getSimulationConfigRealtime 
+  getSimulationConfigRealtime,
+  getRunStatus
 } from '../api/simulation'
 
 const props = defineProps({
@@ -662,6 +680,7 @@ const expectedTotal = ref(null)
 const simulationConfig = ref(null)
 const selectedProfile = ref(null)
 const showProfilesDetail = ref(true)
+const runStatus = ref({ current_round: 0, total_rounds: 0 })
 
 // 日志去重：记录上一次输出的关键信息
 let lastLoggedMessage = ''
@@ -738,9 +757,9 @@ const addLog = (msg) => {
 }
 
 // 处理开始模拟按钮点击
-const handleStartSimulation = () => {
+const handleStartSimulation = (options = {}) => {
   // 构建传递给父组件的参数
-  const params = {}
+  const params = { ...options }
   
   if (useCustomRounds.value) {
     // 用户自定义轮数，传递 max_rounds 参数
@@ -752,6 +771,31 @@ const handleStartSimulation = () => {
   }
   
   emit('next-step', params)
+}
+
+// 处理继续模拟
+const handleResumeSimulation = () => {
+  addLog(`准备继续模拟，从第 ${runStatus.value.current_round} 轮开始...`)
+  handleStartSimulation({ resume: true })
+}
+
+// 获取运行状态
+const fetchCurrentRunStatus = async () => {
+  if (!props.simulationId) return
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (res.success && res.data) {
+      runStatus.value = {
+        current_round: res.data.current_round || 0,
+        total_rounds: res.data.total_rounds || 0
+      }
+      if (runStatus.value.current_round > 0) {
+        addLog(`检测到已有模拟进度：第 ${runStatus.value.current_round} 轮`)
+      }
+    }
+  } catch (err) {
+    console.warn('获取运行状态失败:', err)
+  }
 }
 
 const truncateBio = (bio) => {
@@ -1039,6 +1083,7 @@ const loadPreparedData = async () => {
         
         addLog('✓ 环境搭建完成，可以开始模拟')
         phase.value = 4
+        await fetchCurrentRunStatus()
         emit('update-status', 'completed')
       } else {
         // 配置尚未生成，开始轮询
@@ -1062,10 +1107,11 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
+onMounted(async () => {
   // 自动开始准备流程
   if (props.simulationId) {
     addLog('Step2 环境搭建初始化')
+    await fetchCurrentRunStatus()
     startPrepareSimulation()
   }
 })
@@ -1209,6 +1255,16 @@ onUnmounted(() => {
   background: #E5E5E5;
 }
 
+.action-btn.warning {
+  background: #FFF;
+  color: #E07C24;
+  border: 1px solid #E07C24;
+}
+
+.action-btn.warning:hover:not(:disabled) {
+  background: #FFF8F0;
+}
+
 .action-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -1223,6 +1279,10 @@ onUnmounted(() => {
 .action-group.dual {
   display: grid;
   grid-template-columns: 1fr 1fr;
+}
+
+.action-group.dual.with-resume {
+  grid-template-columns: 1fr 1fr 1.2fr;
 }
 
 .action-group.dual .action-btn {

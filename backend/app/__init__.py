@@ -37,6 +37,12 @@ def create_app(config_class=Config):
     if should_log_startup:
         logger.info("=" * 50)
         logger.info("MiroFish Backend 启动中...")
+        if config_class.USE_MOCK_LLM:
+            logger.info("🧪🧪🧪 Mock LLM 模式已启用 🧪🧪🧪")
+            logger.info(f"   Mock 服务地址: {config_class.MOCK_LLM_URL}")
+            logger.info("   所有 LLM 调用将使用模拟数据，不消耗真实 Token")
+        else:
+            logger.info(f"LLM: {config_class.LLM_MODEL_NAME} @ {config_class.LLM_BASE_URL[:40]}...")
         logger.info("=" * 50)
     
     # 启用CORS

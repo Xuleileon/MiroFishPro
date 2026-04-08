@@ -21,6 +21,11 @@
       </div>
 
       <div class="header-right">
+        <TokenDashboard 
+          :projectId="projectData?.project_id"
+          :simulationId="simulationId || route.params.simulationId" 
+          step="step5"
+        />
         <div class="workflow-step">
           <span class="step-num">Step 5/5</span>
           <span class="step-name">深度互动</span>
@@ -53,6 +58,7 @@
           :reportId="currentReportId"
           :simulationId="simulationId"
           :systemLogs="systemLogs"
+          :isActivatingEnv="isActivatingEnv"
           @add-log="addLog"
           @update-status="updateStatus"
         />
@@ -66,8 +72,9 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step5Interaction from '../components/Step5Interaction.vue'
+import TokenDashboard from '../components/TokenDashboard.vue'
 import { getProject, getGraphData } from '../api/graph'
-import { getSimulation } from '../api/simulation'
+import { getSimulation, prepareSimulation, startSimulation, getEnvStatus, getSimulationUsage } from '../api/simulation'
 import { getReport } from '../api/report'
 
 const route = useRoute()
@@ -89,6 +96,8 @@ const graphData = ref(null)
 const graphLoading = ref(false)
 const systemLogs = ref([])
 const currentStatus = ref('ready') // ready | processing | completed | error
+const isActivatingEnv = ref(false)
+const envActivationStatus = ref('')
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -109,6 +118,7 @@ const statusClass = computed(() => {
 })
 
 const statusText = computed(() => {
+  if (isActivatingEnv.value && envActivationStatus.value) return envActivationStatus.value
   if (currentStatus.value === 'error') return 'Error'
   if (currentStatus.value === 'completed') return 'Completed'
   if (currentStatus.value === 'processing') return 'Processing'
@@ -128,6 +138,14 @@ const updateStatus = (status) => {
   currentStatus.value = status
 }
 
+// --- Token Usage Statistics ---
+const stats = ref({
+  prompt_tokens: 0,
+  completion_tokens: 0,
+  total_tokens: 0,
+  call_count: 0
+})
+
 // --- Layout Methods ---
 const toggleMaximize = (target) => {
   if (viewMode.value === target) {
@@ -144,9 +162,8 @@ const loadReportData = async () => {
     
     // 获取 report 信息以获取 simulation_id
     const reportRes = await getReport(currentReportId.value)
-    if (reportRes.success && reportRes.data) {
-      const reportData = reportRes.data
-      simulationId.value = reportData.simulation_id
+    if (reportRes && reportRes.success) {
+      simulationId.value = reportRes.data.simulation_id
       
       if (simulationId.value) {
         // 获取 simulation 信息
@@ -154,6 +171,11 @@ const loadReportData = async () => {
         if (simRes.success && simRes.data) {
           const simData = simRes.data
           
+          // 如果 URL 携带了激活环境指令，自动唤醒后台
+          if (route.query.activate_env === 'true') {
+            handleAutoActivateEnv(simulationId.value)
+          }
+
           // 获取 project 信息
           if (simData.project_id) {
             const projRes = await getProject(simData.project_id)
@@ -190,6 +212,52 @@ const loadGraph = async (graphId) => {
     addLog(`图谱加载失败: ${err.message}`)
   } finally {
     graphLoading.value = false
+  }
+}
+
+const handleAutoActivateEnv = async (simId) => {
+  if (isActivatingEnv.value) return
+  
+  try {
+    addLog('🚀 收到激活采访环境请求，正在初始化...')
+    isActivatingEnv.value = true
+    currentStatus.value = 'processing'
+    envActivationStatus.value = '正在唤醒对话系统...'
+
+    // 1. 检查状态，如果已经在运行了，直接跳过启动
+    const statusRes = await getEnvStatus({ simulation_id: simId })
+    if (statusRes.success && (statusRes.data?.status === 'running' || statusRes.data?.status === 'starting')) {
+        addLog('✓ 对话系统已在运行中，直接建立连接')
+        isActivatingEnv.value = false
+        currentStatus.value = 'completed'
+        return
+    }
+
+    // 2. 准备环境 (同步最新配置)
+    const prepRes = await prepareSimulation({ simulation_id: simId })
+    if (!prepRes.success) {
+      throw new Error(prepRes.error || '准备环境失败')
+    }
+    
+    // 3. 启动环境 (续跑模式)
+    const startRes = await startSimulation({ simulation_id: simId, resume: true })
+    if (!startRes.success) {
+      throw new Error(startRes.error || '重连环境失败')
+    }
+    
+    addLog('✓ 对话系统唤醒成功，所有人设与帖子已加载完毕')
+    envActivationStatus.value = '对话系统已就绪'
+  } catch (err) {
+    addLog(`❌ 唤醒环境失败: ${err.message}`)
+    currentStatus.value = 'error'
+    envActivationStatus.value = '对话系统初始化失败'
+  } finally {
+    isActivatingEnv.value = false
+    setTimeout(() => {
+      if (currentStatus.value !== 'error') {
+        currentStatus.value = 'ready'
+      }
+    }, 2000)
   }
 }
 

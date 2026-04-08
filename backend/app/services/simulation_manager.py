@@ -7,7 +7,7 @@ OASIS模拟管理器
 import os
 import json
 import shutil
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -18,6 +18,7 @@ from .zep_entity_reader import FilteredEntities
 from .entity_backend import get_entity_reader
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
 from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
+from .entity_deduplicator import EntityDeduplicator
 
 logger = get_logger('mirofish.simulation')
 
@@ -234,7 +235,8 @@ class SimulationManager:
         document_text: str,
         defined_entity_types: Optional[List[str]] = None,
         use_llm_for_profiles: bool = True,
-        progress_callback: Optional[callable] = None,
+        force_regenerate: bool = False,
+        progress_callback: Optional[Callable] = None,
         parallel_profile_count: int = 3
     ) -> SimulationState:
         """
@@ -301,19 +303,79 @@ class SimulationManager:
                 self._save_simulation_state(state)
                 return state
             
-            # ========== 阶段2: 生成Agent Profile ==========
-            total_entities = len(filtered.entities)
+            # --- 新增：实体去重过滤 ---
+            if progress_callback:
+                progress_callback("reading", 100, "正在对实体进行语义去重...")
             
+            deduplicator = EntityDeduplicator(simulation_id=simulation_id, project_id=state.project_id)
+            deduplicated_entities = deduplicator.process(filtered.entities)
+            
+            # 更新状态中的实体数量为去重后的数量
+            filtered.entities = deduplicated_entities
+            state.entities_count = len(deduplicated_entities)
+            
+            # ========== 阶段2: 生成Agent Profile ==========
+            
+            # 实例化生成器并启用 Zep 检索
+            generator = OasisProfileGenerator(
+                graph_id=state.graph_id,
+                simulation_id=simulation_id,
+                project_id=state.project_id
+            )
+            
+            # 改造 3: 动态实体过滤 (基于模拟目标)
+            if simulation_requirement:
+                if progress_callback:
+                    progress_callback("generating_profiles", 0, "正在进行模拟目标相关性分析...")
+                
+                # 获取当前所有实体的标签集
+                all_entity_labels = []
+                for ent in deduplicated_entities:
+                    all_entity_labels.extend(ent.labels)
+                all_entity_labels = list(set(all_entity_labels))
+                
+                # 调用 LLM 识别活跃类型
+                generator.identify_relevant_types(
+                    simulation_requirement, 
+                    all_entity_labels,
+                    simulation_id=simulation_id,
+                    project_id=state.project_id
+                )
+                
+                # 执行二次过滤
+                initial_count = len(deduplicated_entities)
+                active_entities = [
+                    ent for ent in deduplicated_entities 
+                    if generator._is_individual_entity(ent.get_entity_type() or "") or 
+                       generator._is_group_entity(ent.get_entity_type() or "")
+                ]
+                
+                filtered_count = initial_count - len(active_entities)
+                if filtered_count > 0:
+                    logger.info(f"✨ 动态过滤完成: 已自动剔除 {filtered_count} 个与目标无关的实体")
+                    if progress_callback:
+                        progress_callback("generating_profiles", 5, f"已自动剔除 {filtered_count} 个无关实体")
+                
+                deduplicated_entities = active_entities
+            
+            # 保存当前模拟目标到生成器环境
+            generator.simulation_goal = simulation_requirement
+            
+            total_entities = len(deduplicated_entities)
+            
+            if total_entities == 0:
+                state.status = SimulationStatus.FAILED
+                state.error = "动态过滤后没有剩余的活跃实体，请考虑放宽模拟目标或检查图谱内容"
+                self._save_simulation_state(state)
+                return state
+                
             if progress_callback:
                 progress_callback(
-                    "generating_profiles", 0, 
-                    "开始生成...",
+                    "generating_profiles", 10, 
+                    "开始批量生成人设...",
                     current=0,
                     total=total_entities
                 )
-            
-            # 传入graph_id以启用Zep检索功能，获取更丰富的上下文
-            generator = OasisProfileGenerator(graph_id=state.graph_id)
             
             def profile_progress(current, total, msg):
                 if progress_callback:
@@ -336,15 +398,45 @@ class SimulationManager:
                 realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
                 realtime_platform = "twitter"
             
-            profiles = generator.generate_profiles_from_entities(
-                entities=filtered.entities,
-                use_llm=use_llm_for_profiles,
-                progress_callback=profile_progress,
-                graph_id=state.graph_id,  # 传入graph_id用于Zep检索
-                parallel_count=parallel_profile_count,  # 并行生成数量
-                realtime_output_path=realtime_output_path,  # 实时保存路径
-                output_platform=realtime_platform  # 输出格式
-            )
+            # 检查是否已存在 Profile 文件，如果存在且非强制重新生成，则直接加载
+            profiles = []
+            profiles_exist = False
+            
+            if not force_regenerate and realtime_output_path and os.path.exists(realtime_output_path):
+                try:
+                    if realtime_platform == "reddit":
+                        with open(realtime_output_path, "r", encoding="utf-8") as f:
+                            profiles = json.load(f)
+                    else: # twitter csv
+                        import pandas as pd
+                        df = pd.read_csv(realtime_output_path)
+                        profiles = df.to_dict("records")
+                    
+                    if len(profiles) >= total_entities:
+                        logger.info(f"检测到已存在 {len(profiles)} 个 {realtime_platform} 人设，跳过 LLM 生成环节")
+                        profiles_exist = True
+                        if progress_callback:
+                            progress_callback(
+                                "generating_profiles", 100, 
+                                f"已从缓存加载 {len(profiles)} 个人设",
+                                current=len(profiles),
+                                total=total_entities
+                            )
+                except Exception as e:
+                    logger.warning(f"由于解析错误，无法从缓存加载人设: {e}")
+            
+            if not profiles_exist:
+                profiles = generator.generate_profiles_from_entities(
+                    entities=filtered.entities,
+                    use_llm=use_llm_for_profiles,
+                    progress_callback=profile_progress,
+                    graph_id=state.graph_id,
+                    parallel_count=parallel_profile_count,
+                    realtime_output_path=realtime_output_path,
+                    output_platform=realtime_platform,
+                    simulation_id=simulation_id,
+                    project_id=state.project_id
+                )
             
             state.profiles_count = len(profiles)
             
@@ -358,20 +450,21 @@ class SimulationManager:
                     total=total_entities
                 )
             
-            if state.enable_reddit:
-                generator.save_profiles(
-                    profiles=profiles,
-                    file_path=os.path.join(sim_dir, "reddit_profiles.json"),
-                    platform="reddit"
-                )
-            
-            if state.enable_twitter:
-                # Twitter使用CSV格式！这是OASIS的要求
-                generator.save_profiles(
-                    profiles=profiles,
-                    file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
-                    platform="twitter"
-                )
+            if not profiles_exist:
+                if state.enable_reddit:
+                    generator.save_profiles(
+                        profiles=profiles,
+                        file_path=os.path.join(sim_dir, "reddit_profiles.json"),
+                        platform="reddit"
+                    )
+                
+                if state.enable_twitter:
+                    # Twitter使用CSV格式！这是OASIS的要求
+                    generator.save_profiles(
+                        profiles=profiles,
+                        file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
+                        platform="twitter"
+                    )
             
             if progress_callback:
                 progress_callback(

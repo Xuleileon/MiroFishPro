@@ -162,12 +162,15 @@ class OntologyGenerator:
     分析文本内容，生成实体和关系类型定义
     """
     
-    def __init__(self, llm_client: Optional[LLMClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None, project_id: Optional[str] = None):
+        self.project_id = project_id
         self.llm_client = llm_client or LLMClient(
             api_key=Config.EXTRACT_API_KEY,
             base_url=Config.EXTRACT_BASE_URL,
             model=Config.EXTRACT_MODEL_NAME,
+            project_id=project_id
         )
+        self.llm_client.step = 'step1'
     
     def generate(
         self,
@@ -202,7 +205,9 @@ class OntologyGenerator:
         result = self.llm_client.chat_json(
             messages=messages,
             temperature=0.3,
-            max_tokens=4096
+            max_tokens=4096,
+            caller_hint="本体生成",
+            project_id=self.project_id
         )
         
         # 验证和后处理

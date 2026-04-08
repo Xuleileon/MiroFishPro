@@ -4,6 +4,7 @@ Step2: Zep实体读取与过滤、OASIS模拟准备与运行（全程自动化�
 """
 
 import os
+import json
 import traceback
 from flask import request, jsonify, send_file
 
@@ -243,13 +244,24 @@ def _check_simulation_prepared(simulation_id: str) -> tuple:
     if not os.path.exists(simulation_dir):
         return False, {"reason": "模拟目录不存在"}
     
-    # 必要文件列表（不包括脚本，脚本位于 backend/scripts/）
     required_files = [
         "state.json",
-        "simulation_config.json",
-        "reddit_profiles.json",
-        "twitter_profiles.csv"
+        "simulation_config.json"
     ]
+    
+    # 动态检查所需文件
+    state_file = os.path.join(simulation_dir, "state.json")
+    if os.path.exists(state_file):
+        try:
+            import json
+            with open(state_file, 'r', encoding='utf-8') as f:
+                state_data = json.load(f)
+            if state_data.get('enable_reddit', True):
+                required_files.append("reddit_profiles.json")
+            if state_data.get('enable_twitter', True):
+                required_files.append("twitter_profiles.csv")
+        except Exception as e:
+            pass
     
     # 检查文件是否存在
     existing_files = []
@@ -453,7 +465,7 @@ def prepare_simulation():
         # 这样前端在调用prepare后立即就能获取到预期Agent总数
         try:
             logger.info(f"同步获取实体数量: graph_id={state.graph_id}")
-            reader = ZepEntityReader()
+            reader = get_entity_reader()
             # 快速读取实体（不需要边信息，只统计数量）
             filtered_preview = reader.filter_defined_entities(
                 graph_id=state.graph_id,
@@ -563,6 +575,7 @@ def prepare_simulation():
                     document_text=document_text,
                     defined_entity_types=entity_types_list,
                     use_llm_for_profiles=use_llm_for_profiles,
+                    force_regenerate=force_regenerate, # 新增
                     progress_callback=progress_callback,
                     parallel_profile_count=parallel_profile_count
                 )
@@ -1306,7 +1319,10 @@ def start_simulation():
         platform = data.get('platform', 'parallel')
         max_rounds = data.get('max_rounds')  # 可选：最大模拟轮数
         enable_graph_memory_update = data.get('enable_graph_memory_update', False)  # 可选：是否启用图谱记忆更新
-        force = data.get('force', False)  # 可选：强制重新开始
+        force = data.get('force', False) or data.get('force_restart', False)  # 支持 force 或 force_restart 别名
+        resume = data.get('resume', False)  # 可选：续跑模式（从上次中断处继续）
+        resume_from_round = 0  # 默认从头开始
+
 
         # 验证 max_rounds 参数
         if max_rounds is not None:
@@ -1366,16 +1382,50 @@ def start_simulation():
                                 "error": f"模拟正在运行中，请先调用 /stop 接口停止，或使用 force=true 强制重新开始"
                             }), 400
 
-                # 如果是强制模式，清理运行日志
-                if force:
+                # 如果是强制模式，清理运行日志 (但如果明确要求 resume，则忽略 force)
+                if force and not resume:
                     logger.info(f"强制模式：清理模拟日志 {simulation_id}")
                     cleanup_result = SimulationRunner.cleanup_simulation_logs(simulation_id)
                     if not cleanup_result.get("success"):
                         logger.warning(f"清理日志时出现警告: {cleanup_result.get('errors')}")
                     force_restarted = True
+                elif resume:
+                    # 续跑模式：从 run_state.json 读取上次完成的轮次
+                    run_state = SimulationRunner.get_run_state(simulation_id)
+                    if run_state and run_state.current_round > 0:
+                        resume_from_round = run_state.current_round
+                        logger.info(f"续跑模式：从第 {resume_from_round} 轮继续 ({simulation_id})")
+                    else:
+                        logger.info(f"续跑模式：未找到之前的进度，从头开始 ({simulation_id})")
 
-                # 进程不存在或已结束，重置状态为 ready
-                logger.info(f"模拟 {simulation_id} 准备工作已完成，重置状态为 ready（原状态: {state.status.value}）")
+                # 如果传入了新的 max_rounds，同步到磁盘配置文件和运行状态中
+                if max_rounds:
+                    try:
+                        # 1. 更新配置文件
+                        config_path = os.path.join(Config.UPLOAD_FOLDER, 'simulations', simulation_id, 'simulation_config.json')
+                        if os.path.exists(config_path):
+                            with open(config_path, 'r', encoding='utf-8') as f:
+                                current_config = json.load(f)
+                            minutes_per_round = current_config.get('time_config', {}).get('minutes_per_round', 60)
+                            new_total_hours = (max_rounds * minutes_per_round + 59) // 60
+                            current_config['time_config']['total_simulation_hours'] = new_total_hours
+                            with open(config_path, 'w', encoding='utf-8') as f:
+                                json.dump(current_config, f, ensure_ascii=False, indent=2)
+                            logger.info(f"已同步配置文件轮数: max_rounds={max_rounds}")
+
+                        # 2. 强制同步到运行状态 (核心修复)
+                        run_state = SimulationRunner.get_run_state(simulation_id)
+                        if run_state:
+                            run_state.total_rounds = max_rounds
+                            # 清除之前的错误，让断点模拟能重整旗鼓
+                            run_state.error = None 
+                            SimulationRunner._save_run_state(run_state)
+                            logger.info(f"已强制刷新 run_state.total_rounds -> {max_rounds}")
+                    except Exception as e:
+                        logger.warning(f"同步进度时出现异常: {e}")
+
+                # 准备工作已完成，仅重置管理层状态为 READY
+                logger.info(f"模拟 {simulation_id} 准备就绪 (READY)")
                 state.status = SimulationStatus.READY
                 manager._save_simulation_state(state)
             else:
@@ -1423,7 +1473,9 @@ def start_simulation():
             platform=platform,
             max_rounds=max_rounds,
             enable_graph_memory_update=enable_graph_memory_update,
-            graph_id=graph_id
+            graph_id=graph_id,
+            resume_from_round=resume_from_round,
+            project_id=state.project_id
         )
         
         # 更新模拟状态
@@ -1520,6 +1572,79 @@ def stop_simulation():
 
 
 # ============== 实时状态监控接口 ==============
+
+@simulation_bp.route('/<simulation_id>/usage', methods=['GET'])
+def get_simulation_usage(simulation_id: str):
+    """
+    获取模拟的 Token 消耗统计 (包含当前模拟和所属项目全链路聚合)
+    """
+    try:
+        # 1. 获取当前模拟损耗
+        usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "call_count": 0,
+            "last_updated": None
+        }
+        sim_dir = os.path.join(Config.UPLOAD_FOLDER, 'simulations', simulation_id)
+        usage_file = os.path.join(sim_dir, 'usage.json')
+        usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "call_count": 0,
+            "last_updated": ""
+        }
+        if os.path.exists(usage_file):
+            with open(usage_file, 'r', encoding='utf-8') as f:
+                try:
+                    usage = json.load(f)
+                except: pass
+        
+        # 1.5 提取特定环节的账单 (如果指定了 step)
+        step_id = request.args.get('step')
+        display_data = usage
+        if step_id:
+            if "steps" in usage and step_id in usage["steps"]:
+                display_data = usage["steps"][step_id]
+            else:
+                # 如果指定了环节但还没有产生账目，强行清零返回，防止返回总额导致的数值污染
+                display_data = {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "call_count": 0
+                }
+        
+        # 2. 获取所属项目的全链路累计损耗
+        total_usage = usage # 默认为当前模拟损耗
+        try:
+            manager = SimulationManager()
+            state = manager.get_simulation(simulation_id)
+            if state and state.project_id:
+                from ..models.project import ProjectManager
+                total_usage = ProjectManager.get_aggregated_usage(state.project_id)
+        except Exception: pass
+            
+        return jsonify({
+            "success": True,
+            "data": display_data,    # 环节数据 (可能为分账数据)
+            "total": total_usage     # 项目总计数据
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+        
+    except Exception as e:
+        logger.error(f"获取 Token 统计失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 
 @simulation_bp.route('/<simulation_id>/run-status', methods=['GET'])
 def get_run_status(simulation_id: str):

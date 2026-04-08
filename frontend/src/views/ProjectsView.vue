@@ -64,6 +64,7 @@
           <div class="col select">选择</div>
           <div class="col name">项目</div>
           <div class="col status">交互</div>
+          <div class="col usage">消耗</div>
           <div class="col ids">ID</div>
           <div class="col time">更新时间</div>
           <div class="col action">操作</div>
@@ -98,6 +99,13 @@
               {{ reportStatusText(p.latest_completed_report?.report_status || p.latest_report?.report_status) }}
             </span>
           </div>
+          <div class="col usage">
+            <div class="usage-value" :title="`Prompt: ${p.token_usage?.prompt_tokens?.toLocaleString()}, Completion: ${p.token_usage?.completion_tokens?.toLocaleString()}`">
+              {{ formatTokens(p.token_usage?.total_tokens || 0) }}
+              <span class="usage-unit">tkns</span>
+            </div>
+            <div class="usage-calls">{{ p.token_usage?.call_count || 0 }} calls</div>
+          </div>
           <div class="col ids">
             <div class="mono">{{ p.project_id }}</div>
             <div class="mono muted" v-if="p.graph_id">graph: {{ p.graph_id }}</div>
@@ -113,6 +121,14 @@
           </div>
           <div class="col action">
             <div class="actions" @click.stop>
+              <button
+                v-if="p.latest_completed_report?.report_id"
+                class="mini-btn success"
+                type="button"
+                @click="activateInterview(p)"
+              >
+                激活采访 →
+              </button>
               <button
                 v-if="p.latest_completed_report?.report_id"
                 class="mini-btn primary"
@@ -373,6 +389,18 @@ const openInteraction = (reportId) => {
   router.push({ name: 'Interaction', params: { reportId } })
 }
 
+const activateInterview = (project) => {
+  const reportId = project.latest_completed_report?.report_id
+  if (!reportId) return
+  const simulationId = project.latest_completed_report?.simulation_id || project.latest_ready_simulation?.simulation_id
+  
+  router.push({ 
+    name: 'Interaction', 
+    params: { reportId },
+    query: { activate_env: 'true', sim_id: simulationId }
+  })
+}
+
 const deleteSelected = async () => {
   if (selectedIds.value.size === 0) return
   if (!window.confirm(`确定删除选中的 ${selectedIds.value.size} 个项目？删除后无法恢复。`)) {
@@ -476,6 +504,13 @@ const formatTime = (isoString) => {
     second: '2-digit',
     hour12: false
   })
+}
+
+const formatTokens = (total) => {
+  if (!total) return '0'
+  if (total >= 1000000) return (total / 1000000).toFixed(2) + 'M'
+  if (total >= 1000) return (total / 1000).toFixed(1) + 'K'
+  return total.toLocaleString()
 }
 
 onMounted(() => {
@@ -661,7 +696,7 @@ onMounted(() => {
 
 .list-header {
   display: grid;
-  grid-template-columns: 56px 2fr 0.7fr 1.6fr 1fr 1.2fr;
+  grid-template-columns: 56px 2fr 0.7fr 0.8fr 1.6fr 1fr 1.2fr;
   gap: 12px;
   padding: 12px 14px;
   background: #f7f7f7;
@@ -674,7 +709,7 @@ onMounted(() => {
   width: 100%;
   text-align: left;
   display: grid;
-  grid-template-columns: 56px 2fr 0.7fr 1.6fr 1fr 1.2fr;
+  grid-template-columns: 56px 2fr 0.7fr 0.8fr 1.6fr 1fr 1.2fr;
   gap: 12px;
   padding: 14px;
   border: none;
@@ -762,6 +797,35 @@ onMounted(() => {
   background: #f6f6f6;
 }
 
+.col.usage {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+.usage-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #000;
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.usage-unit {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #999;
+}
+
+.usage-calls {
+  font-size: 0.75rem;
+  color: #BBB;
+  font-style: italic;
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;
@@ -777,6 +841,12 @@ onMounted(() => {
   color: #000;
   cursor: pointer;
   font-size: 0.85rem;
+}
+
+.mini-btn.success {
+  border-color: #28a745;
+  background: rgba(40, 167, 69, 0.08);
+  color: #28a745;
 }
 
 .mini-btn.primary {

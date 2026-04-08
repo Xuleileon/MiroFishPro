@@ -101,6 +101,15 @@ export const getRunStatus = (simulationId) => {
 }
 
 /**
+ * 获取模拟 Token 消耗统计
+ * @param {string} simulationId
+ */
+export const getSimulationUsage = (simulationId, step = null) => {
+  const params = step ? { step } : {}
+  return service.get(`/api/simulation/${simulationId}/usage`, { params })
+}
+
+/**
  * 获取模拟运行详细状态（包含最近动作）
  * @param {string} simulationId
  */

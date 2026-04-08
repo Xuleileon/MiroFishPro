@@ -89,6 +89,24 @@ class PlatformActionLogger:
         with open(self.log_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
     
+    def log_resume_start(self, resume_from_round: int, total_rounds: int):
+        """记录续跑开始标记
+        
+        Args:
+            resume_from_round: 从第几轮开始续跑
+            total_rounds: 总轮数
+        """
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "event_type": "resume_start",
+            "platform": self.platform,
+            "resume_from_round": resume_from_round,
+            "total_rounds": total_rounds,
+        }
+        
+        with open(self.log_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+    
     def log_simulation_start(self, config: Dict[str, Any]):
         """记录模拟开始"""
         entry = {

@@ -70,6 +70,15 @@ export function getProject(projectId) {
 }
 
 /**
+ * 获取项目 Token 消耗统计 (Step 1)
+ * @param {String} projectId
+ */
+export const getProjectUsage = (projectId, step = null) => {
+  const params = step ? { step } : {}
+  return service.get(`/api/graph/project/${projectId}/usage`, { params })
+}
+
+/**
  * 列出历史项目
  * @param {number} limit
  */

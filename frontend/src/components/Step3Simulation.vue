@@ -99,6 +99,51 @@
           <span v-if="isStopping" class="loading-spinner-small"></span>
           {{ isStopping ? '暂停中...' : '暂停模拟' }}
         </button>
+
+        <!-- 初始开始按钮 -->
+        <button
+          v-if="phase === 0"
+          class="action-btn primary"
+          :disabled="isStarting"
+          @click="doStartSimulation"
+        >
+          <span v-if="isStarting" class="loading-spinner-small"></span>
+          {{ isStarting ? '启动中...' : '开始模拟' }}
+        </button>
+
+        <!-- 续跑/重新开始按钮（中断状态时显示） -->
+        <template v-if="interruptedState">
+          <button
+            class="action-btn resume"
+            :disabled="isStarting"
+            @click="doResumeSimulation"
+          >
+            <span v-if="isStarting" class="loading-spinner-small"></span>
+            继续模拟 (从第{{ interruptedState.current_round }}轮)
+          </button>
+          <button
+            class="action-btn warning"
+            :disabled="isStarting"
+            @click="doStartSimulation"
+          >
+            重新开始
+          </button>
+        </template>
+
+        <!-- 已完成状态下的重新模拟按钮 -->
+        <template v-if="phase === 2">
+          <button
+            class="action-btn warning"
+            :disabled="isStarting"
+            @click="doStartSimulation"
+          >
+            <svg class="btn-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+            重新模拟
+          </button>
+        </template>
+
         <button 
           class="action-btn primary"
           :disabled="phase !== 2 || isGeneratingReport"
@@ -108,6 +153,7 @@
           {{ isGeneratingReport ? '启动中...' : '开始生成结果报告' }} 
           <span v-if="!isGeneratingReport" class="arrow-icon">→</span>
         </button>
+
       </div>
     </div>
 
@@ -295,7 +341,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { 
   getSimulation,
   prepareSimulation,
@@ -322,6 +368,7 @@ const props = defineProps({
 const emit = defineEmits(['go-back', 'next-step', 'add-log', 'update-status'])
 
 const router = useRouter()
+const route = useRoute()
 
 // State
 const isGeneratingReport = ref(false)
@@ -333,6 +380,7 @@ const runStatus = ref({})
 const allActions = ref([]) // 所有动作（增量累积）
 const actionIds = ref(new Set()) // 用于去重的动作ID集合
 const scrollContainer = ref(null)
+const interruptedState = ref(null) // 中断状态（用于显示续跑/重新开始选项）
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -348,11 +396,12 @@ const getAxiosErrorMessage = (err) => {
 const ensureSimulationPrepared = async () => {
   if (!props.simulationId) return
 
-  // Quick check: if already READY, skip.
+  // Quick check: if already in a prepared state, skip.
   try {
     const sim = await getSimulation(props.simulationId)
     const status = (sim?.data?.status || '').toLowerCase()
-    if (status === 'ready') return
+    const preparedStatuses = ['ready', 'running', 'paused', 'completed', 'stopped', 'failed']
+    if (preparedStatuses.includes(status)) return
   } catch (_) {
     // ignore and try prepare directly
   }
@@ -446,10 +495,11 @@ const resetAllState = () => {
   startError.value = null
   isStarting.value = false
   isStopping.value = false
+  interruptedState.value = null
   stopPolling()  // 停止之前可能存在的轮询
 }
 
-// 启动模拟
+// 启动模拟（强制重新开始）
 const doStartSimulation = async () => {
   if (!props.simulationId) {
     addLog('错误：缺少 simulationId')
@@ -514,6 +564,115 @@ const doStartSimulation = async () => {
   }
 }
 
+// 续跑模拟（从上次中断处继续）
+const doResumeSimulation = async () => {
+  if (!props.simulationId || !interruptedState.value) {
+    addLog('错误：缺少续跑所需信息')
+    return
+  }
+  
+  const resumeRound = interruptedState.value.current_round
+  interruptedState.value = null  // 清除中断状态提示
+  
+  isStarting.value = true
+  startError.value = null
+  addLog(`正在从第 ${resumeRound} 轮继续模拟...`)
+  emit('update-status', 'processing')
+  
+  try {
+    await ensureSimulationPrepared()
+
+    const params = {
+      simulation_id: props.simulationId,
+      platform: 'parallel',
+      resume: true,  // 续跑模式
+      enable_graph_memory_update: true
+    }
+    
+    if (props.maxRounds) {
+      params.max_rounds = props.maxRounds
+    }
+
+    const res = await startSimulation(params)
+    
+    if (res.success && res.data) {
+      addLog(`✓ 续跑模式启动成功，从第 ${resumeRound} 轮继续`)
+      addLog(`  ├─ PID: ${res.data.process_pid || '-'}`)
+      
+      phase.value = 1
+      runStatus.value = res.data
+      allActions.value = [] // 核心修复：清空旧的动作列表，确保续跑后看到的是实时更新
+      
+      startStatusPolling()
+      startDetailPolling()
+    } else {
+      startError.value = res.error || '续跑启动失败'
+      addLog(`✗ 续跑启动失败: ${res.error || '未知错误'}`)
+      emit('update-status', 'error')
+    }
+  } catch (err) {
+    const msg = getAxiosErrorMessage(err)
+    startError.value = msg
+    addLog(`✗ 续跑异常: ${msg}`)
+    emit('update-status', 'error')
+  } finally {
+    isStarting.value = false
+  }
+}
+
+// 检查并初始化模拟状态
+const initSimulationStatus = async () => {
+  if (!props.simulationId) return
+  
+  try {
+    addLog('正在同步云端模拟状态...')
+    const res = await getRunStatus(props.simulationId)
+    const status = res?.data
+    
+    if (!status) {
+      addLog('未发现之前的模拟运行记录')
+      return
+    }
+
+    // 状态提取
+    const runnerStatus = status.runner_status
+    const currentRound = status.current_round
+    const totalRounds = status.total_rounds
+    const actionsCount = status.twitter_actions_count + status.reddit_actions_count
+
+    runStatus.value = status
+
+    if (runnerStatus === 'running' || runnerStatus === 'starting') {
+      addLog('检测到模拟正在运行中，已连接并开启实时监控')
+      phase.value = 1
+      startStatusPolling()
+      startDetailPolling()
+    } else if (currentRound > 0 || actionsCount > 0) {
+      // 只要有进度，就预置中断/可续跑状态
+      interruptedState.value = {
+        current_round: currentRound || 1,
+        total_rounds: totalRounds,
+        runner_status: runnerStatus
+      }
+      
+      if (runnerStatus === 'completed' || (totalRounds > 0 && currentRound >= totalRounds)) {
+        addLog(`✓ 模拟已达成分段目标 (${currentRound}/${totalRounds})，如有需要可继续运行以增加轮数`)
+        phase.value = 2
+        await fetchRunStatusDetail()
+        emit('update-status', 'completed')
+      } else {
+        addLog(`⚠ 检测到中断的模拟 (进度: ${currentRound}/${totalRounds})`)
+        phase.value = 0
+        await fetchRunStatusDetail()
+      }
+    } else {
+      addLog('模拟环境已就绪，点击上方按钮开始')
+    }
+  } catch (err) {
+    addLog(`获取状态失败: ${err.message}`)
+  }
+}
+
 // 停止模拟
 const handleStopSimulation = async () => {
   if (!props.simulationId) return
@@ -571,40 +730,33 @@ const fetchRunStatus = async () => {
   
   try {
     const res = await getRunStatus(props.simulationId)
-    
-    if (res.success && res.data) {
+    if (res && res.success && res.data) {
       const data = res.data
       
-      runStatus.value = data
-      
-      // 分别检测各平台的轮次变化并输出日志
-      if (data.twitter_current_round > prevTwitterRound.value) {
-        addLog(`[Plaza] R${data.twitter_current_round}/${data.total_rounds} | T:${data.twitter_simulated_hours || 0}h | A:${data.twitter_actions_count}`)
-        prevTwitterRound.value = data.twitter_current_round
-      }
-      
-      if (data.reddit_current_round > prevRedditRound.value) {
-        addLog(`[Community] R${data.reddit_current_round}/${data.total_rounds} | T:${data.reddit_simulated_hours || 0}h | A:${data.reddit_actions_count}`)
-        prevRedditRound.value = data.reddit_current_round
-      }
-      
-      // 检测模拟是否已完成（通过 runner_status 或平台完成状态判断）
-      const isCompleted = data.runner_status === 'completed' || data.runner_status === 'stopped'
-      
-      // 额外检查：如果后端还没来得及更新 runner_status，但平台已经报告完成
-      // 通过检测 twitter_completed 和 reddit_completed 状态判断
-      const platformsCompleted = checkPlatformsCompleted(data)
-      
-      if (isCompleted || platformsCompleted) {
-        if (platformsCompleted && !isCompleted) {
-          addLog('✓ 检测到所有平台模拟已结束')
+      // 完结状态同步逻辑：如果已完成，强制各平台进度拉满
+      if (data.runner_status === 'completed') {
+        data.current_round = data.total_rounds
+        data.twitter_current_round = data.total_rounds
+        data.reddit_current_round = data.total_rounds
+        
+        if (phase.value !== 2) {
+          phase.value = 2
+          stopPolling()
+          emit('update-status', 'completed')
+          addLog('✓ 模拟全部完成')
         }
-        addLog('✓ 模拟已完成')
-        phase.value = 2
-        stopPolling()
-        emit('update-status', 'completed')
       }
+ else if (data.runner_status === 'failed') {
+        stopPolling()
+        addLog(`❌ 模拟失败: ${data.error || '未知错误'}`)
+      } else if (data.runner_status === 'interrupted') {
+        stopPolling()
+        addLog('⚠ 模拟已中断')
+      }
+
+      runStatus.value = data
     }
+
   } catch (err) {
     console.warn('获取运行状态失败:', err)
   }
@@ -742,8 +894,15 @@ const handleNextStep = async () => {
       const reportId = res.data.report_id
       addLog(`✓ 报告生成任务已启动: ${reportId}`)
       
-      // 跳转到报告页面
-      router.push({ name: 'Report', params: { reportId } })
+      // 跳转到报告页面，同时携带项目和模拟 ID，确保仪表盘在报告加载完成前也能显示
+      router.push({ 
+        name: 'Report', 
+        params: { reportId },
+        query: { 
+          projectId: props.projectData?.project_id,
+          simulationId: props.simulationId
+        }
+      })
     } else {
       addLog(`✗ 启动报告生成失败: ${res.error || '未知错误'}`)
       isGeneratingReport.value = false
@@ -764,11 +923,27 @@ watch(() => props.systemLogs?.length, () => {
   })
 })
 
-onMounted(() => {
-  addLog('Step3 模拟运行初始化')
-  if (props.simulationId) {
-    doStartSimulation()
+// 自动续跑逻辑
+const checkAutoResume = async () => {
+  if (route.query.resume === 'true') {
+    // 等待状态同步完成，最多等 3 次
+    for (let i = 0; i < 3; i++) {
+        if (interruptedState.value) {
+            addLog('检测到自动续跑信号，系统正在接管进度...')
+            await doResumeSimulation()
+            return true
+        }
+        await new Promise(resolve => setTimeout(resolve, 500))
+    }
+    addLog('⚠ 未发现可接管的断点，请检查模拟记录')
   }
+  return false
+}
+
+onMounted(async () => {
+  addLog('SimulationRunView 初始化中...')
+  await initSimulationStatus()
+  await checkAutoResume()
 })
 
 onUnmounted(() => {
@@ -987,6 +1162,26 @@ onUnmounted(() => {
 
 .action-btn.danger:hover:not(:disabled) {
   background: #FFF5F5;
+}
+
+.action-btn.resume {
+  background: #1A936F;
+  color: #FFF;
+  border: 1px solid #1A936F;
+}
+
+.action-btn.resume:hover:not(:disabled) {
+  background: #147A5C;
+}
+
+.action-btn.warning {
+  background: #FFF;
+  color: #E07C24;
+  border: 1px solid #E07C24;
+}
+
+.action-btn.warning:hover:not(:disabled) {
+  background: #FFF8F0;
 }
 
 .action-btn:disabled {
