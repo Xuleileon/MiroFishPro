@@ -55,83 +55,225 @@ Click the image to watch the complete demo video for prediction using BettaFish-
 4. **Report Generation**: ReportAgent with rich toolset for deep interaction with post-simulation environment
 5. **Deep Interaction**: Chat with any agent in the simulated world & Interact with ReportAgent. If interviews are unavailable/timeout, it falls back to persona + graph/vector retrieval.
 
-## MiroFishOpt Updates
+---
 
-- Projects page: select and bulk delete projects (cleans graph first).
-- Report generation stability: fix undefined `disable_interview` when interviews are disabled.
-- Default entry now points to `http://localhost:3000/projects`; homepage is available at `http://localhost:3000/home`.
-- `npm run dev` now starts local dependencies first (auto unpause, then docker compose up -d).
+# MiroFishPro (Further Optimization Based on MiroFishOpt)
 
-## 🚀 Quick Start
+`MiroFishPro` builds on `MiroFishOpt`'s local storage foundation, further improving industrial-grade stability, billing accuracy, and simulation efficiency across the full Step 1–5 pipeline.
 
-### Prerequisites
+## Project Origin
 
-> Note: MiroFish was developed and tested on Mac. Windows compatibility is unknown and currently under testing.
+- Upstream: `https://github.com/jwc19890114/MiroFishOpt` (local storage version, based on `https://github.com/666ghj/MiroFish`)
+- Core dependency: OASIS simulation engine (for social multi-agent simulation)
+- Goal: On top of MiroFishOpt's completed local storage (Neo4j + Qdrant), further resolve billing accuracy, simulation stability, and UI reliability issues in production scenarios. Adds Mock test server, AI-driven entity filtering, context-summary Token compression, and other production-grade features — making the full Step 1–5 pipeline observable, auditable, and resumable.
 
-| Tool | Version | Description | Check Installation |
-|------|---------|-------------|-------------------|
-| **Node.js** | 18+ | Frontend runtime, includes npm | `node -v` |
-| **Python** | 3.11+ | Backend runtime | `python --version` |
-| **uv** | Latest | Python package manager | `uv --version` |
+## What's New (Key Changes)
 
-### 1. Configure Environment Variables
+### 1) Mock Server Auto-Integration (Zero-Cost Testing Mode)
+
+- **One-click Mock mode**: Set `USE_MOCK_LLM=true` in `.env` — the backend **automatically starts the built-in Mock server** when launched. Test the full Step 1–5 pipeline without consuming real Tokens.
+- **Intelligent stage detection**: The Mock server automatically identifies the calling stage (ontology generation, entity extraction, persona generation, simulation actions, report outline/sections, etc.) and returns appropriately formatted mock data.
+- **Configurable Mock URL**: Use `MOCK_LLM_URL` to specify the Mock server address (default `http://localhost:5099`) for custom deployments in complex network environments.
+- **Graceful shutdown**: The backend registers an `atexit` hook to automatically terminate the Mock subprocess on exit, preventing orphaned port bindings.
+
+### 2) AI-Driven Dynamic Entity Filtering (Smart Agent Selection)
+
+- **Dynamic label recognition**: Uses LLM to analyze graph labels against the simulation goal, automatically identifying which entity types should become social Agents (e.g., "Student", "Government Agency") and excluding irrelevant types (e.g., "Auto Parts" in a medical simulation).
+- **Individual / Group classification**: Splits recognized labels into "individual accounts" and "institutional accounts", driving different persona generation strategies for more realistic and dimensional simulation characters.
+
+### 3) Social Graph Coupling (Degree Centrality Driven)
+
+- **Degree-weighted influence**: Agent follower counts, posting frequency, and social status are tied to the entity's out-degree (Degree Centrality) in the knowledge graph — the more connected an entity is in the graph, the higher its social influence in the simulation, achieving physical alignment between graph knowledge and the simulated world.
+
+### 4) Simulation Round Context Summary Optimization (Large-Scale Token Savings)
+
+- **Intelligent history compression**: Refactored OASIS's `SocialEnvironment.get_posts_env`. Posts beyond the most recent 10 are summarized by LLM into a ≤500-word "history summary" and cached; each round broadcasts one summary + the last 10 posts in full, dramatically reducing per-round context length and Token consumption.
+- **Agent-First sampling algorithm**: When generating summaries, the algorithm prioritizes the 2 most recent posts from each agent + high-engagement posts, ensuring the summary covers all perspectives without bias.
+- **Round-level caching**: Uses "total post count" as the cache key; all agents within the same round share a single summary, with precise per-round invalidation.
+
+### 5) OASIS Engine Idempotency Patches (Resume Reliability)
+
+- **Idempotent table creation (Patch 1)**: Patches OASIS's `create_db()` to use `CREATE TABLE IF NOT EXISTS`, fixing crashes on resume when the database already exists.
+- **Idempotent sign-up (Patch 2)**: Patches `Platform.sign_up()` to check if a user already exists before inserting, skipping rather than throwing a primary key conflict, enabling safe resume after abnormal exit.
+
+### 6) Backend-Driven Physical Token Billing
+
+- **Single source of truth**: Moves billing authority from the frontend to the backend `usage.json`, resolving Token loss in multi-process and heterogeneous environments.
+- **Stage-isolated accounting (Zero-Based Analytics)**: Precisely isolates costs for Step 1 through Step 5, ensuring "report generation (step4)" and "interactive chat (step5)" fees never overlap.
+- **Subprocess billing passthrough**: Fixes a bug where simulation subprocesses couldn't record fees due to environment isolation (via absolute import correction + environment variable persistence), achieving zero Token loss across the full chain.
+
+### 7) Algorithmic Guardrails & Infinite Loop Prevention
+
+- **Mandatory pointer advancement**: Introduces a safety threshold in `file_parser.py` chunking logic, eliminating the risk of LLM infinite loops when processing large files or extreme chunking parameters.
+- **Defensive API validation**: Adds strict parameter constraints at the graph build entry point `graph.py`, blocking illegal configurations like `chunk_size <= overlap` that could exhaust resources.
+
+### 8) Simulation & IPC Communication Hardening
+
+- **Transparent failure feedback**: Refactored interview command response mechanism — backend logs now report specific failure reasons (e.g., "Agent ID mismatch") instead of a generic `failed`.
+- **Framework deep adaptation**: Fixed illegal attribute access on the `oasis` library's `AgentGraph` (`.agents` → `.agent_mappings.values()`), resolving the Step 5 batch interview process crash.
+
+### 9) Full-Stack UI Resilience
+
+- **Decoupled billing dashboard**: Refactored `TokenDashboard` to start polling immediately upon receiving `simulationId`, without waiting for a three-level API chain to complete. Silently retries on API 404 (report still generating).
+- **Robust report navigation**: Passes `projectId`/`simulationId` via URL query parameters, ensuring correct data retrieval on page refresh or during report generation intermediate states.
+
+---
+
+## Data Storage (How to Access Historical Projects)
+
+### Project Metadata & Uploaded Files (Local Files)
+
+Projects are persisted in the backend `uploads` directory by `project_id`:
+- Project folder: `MiroFishOpt/backend/uploads/projects/<project_id>/`
+- Metadata: `MiroFishOpt/backend/uploads/projects/<project_id>/project.json`
+- Raw files: `MiroFishOpt/backend/uploads/projects/<project_id>/files/`
+- Extracted text: `MiroFishOpt/backend/uploads/projects/<project_id>/extracted_text.txt`
+
+Two ways to view historical projects:
+- Frontend: `http://localhost:3000/projects`
+- Backend API: `GET /api/graph/project/list`
+
+### Graph & Vector (Local Services)
+
+- Graph: Neo4j (container exposes `bolt://localhost:7687`, browser `http://localhost:7474`)
+- Vector: Qdrant (default `http://localhost:6333`)
+- Qdrant collection: controlled by `QDRANT_COLLECTION_CHUNKS` in `.env` (default `mirofish_chunks`)
+
+## 🚀 How to Run (Linux / macOS / Windows)
+
+### 0) Prerequisites
+
+- Node.js 18+
+- Python 3.11+
+- `uv` (Python dependency manager)
+- Docker (recommended, for one-click Neo4j/Qdrant startup)
+
+### 1) Start Local Dependencies (Neo4j + Qdrant)
 
 ```bash
-# Copy the example configuration file
-cp .env.example .env
-
-# Edit the .env file and fill in the required API keys
+docker compose -f docker-compose.local.yml up -d
 ```
 
-**Required Environment Variables:**
+Default Neo4j credentials hardcoded in `docker-compose.local.yml`:
+- User: `neo4j`
+- Password: `mirofish`
+
+Must match `.env`: `NEO4J_PASSWORD=mirofish`
+
+### 2) Configure Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Minimum required configuration:
 
 ```env
-# LLM API Configuration (supports any LLM with OpenAI SDK format)
-# Recommended: Alibaba Qwen-plus model via Bailian Platform: https://bailian.console.aliyun.com/
-# High consumption, try simulations with fewer than 40 rounds first
+# OpenAI-compatible LLM
 LLM_API_KEY=your_api_key
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_MODEL_NAME=qwen-plus
+LLM_BASE_URL=your_base_url
+LLM_MODEL_NAME=your_model_name
 
-# Zep Cloud Configuration
-# Free monthly quota is sufficient for simple usage: https://app.getzep.com/
-ZEP_API_KEY=your_zep_api_key
+# Local storage
+GRAPH_BACKEND=local
+VECTOR_BACKEND=qdrant
+
+# Neo4j (must match compose)
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=mirofish
+
+# Qdrant
+QDRANT_URL=http://localhost:6333
 ```
 
-### 2. Install Dependencies
+Optional (strongly recommended to review):
+
+```env
+# Extraction-specific LLM: resolves data_inspection_failed review issues
+# EXTRACT_API_KEY=...
+# EXTRACT_BASE_URL=...
+# EXTRACT_MODEL_NAME=...
+
+# Report-specific LLM: used when report generation triggers data_inspection_failed
+# REPORT_API_KEY=...
+# REPORT_BASE_URL=...
+# REPORT_MODEL_NAME=...
+
+# Embeddings: configure if your provider supports it; otherwise set VECTOR_BACKEND=none
+# EMBEDDING_MODEL_NAME=...
+# EMBEDDING_BASE_URL=...
+# EMBEDDING_API_KEY=...
+
+# Mock mode (zero Token testing — auto-starts mock server when enabled)
+# USE_MOCK_LLM=true
+# MOCK_LLM_URL=http://localhost:5099
+```
+
+### 3) Install Dependencies
+
+From the project root:
 
 ```bash
-# One-click installation of all dependencies (root + frontend + backend)
 npm run setup:all
 ```
 
-Or install step by step:
+If you prefer not to use `uv`, use native `venv + pip` (backend Python dependencies only):
 
 ```bash
-# Install Node dependencies (root + frontend)
-npm run setup
+cd backend
+python -m venv .venv
 
-# Install Python dependencies (auto-creates virtual environment)
-npm run setup:backend
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+
+# macOS/Linux
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-### 3. Start Services
+### 4) Start Services
 
 ```bash
-# Start both frontend and backend (run from project root)
 npm run dev
 ```
 
-**Service URLs:**
+Access:
 - Frontend: `http://localhost:3000`
-- Backend API: `http://localhost:5001`
+- Backend: `http://localhost:5001`
 
-**Start Individually:**
+## Recommended Usage Flow
 
-```bash
-npm run backend   # Start backend only
-npm run frontend  # Start frontend only
-```
+1. **Step 1 — Graph Building**: Upload materials → Generate ontology → Build graph (writes to Neo4j locally, optionally to Qdrant)
+2. **Step 2 — Environment Setup**: Generate Agent Profiles from graph entities (written to `backend/uploads/simulations/<simulation_id>/...`)
+3. **Step 3 — Launch Simulation**: Start parallel simulation (Twitter + Reddit); local mode auto-disables "live graph memory sync". Click "Pause Simulation" in the top-right to stop mid-run.
+4. **Step 4 — Generate Report**: ReportAgent uses local tools (graph + vector + interview) to generate the report
+5. **Step 5 — Interact**: Query the report and simulated world interactively; if interviews are unavailable/timeout, automatically falls back to persona + graph/vector retrieval
+
+## Report Export
+
+- After generation, export as Markdown:
+  - Click the "Export Report (MD)" button on the right side of the Step 4 page
+  - Or: `GET /api/report/<report_id>/download`
+- File is also saved locally: `backend/uploads/reports/<report_id>/full_report.md`
+
+## Troubleshooting
+
+- **`400 data_inspection_failed / inappropriate content`**:
+  - During graph building/extraction: Use `EXTRACT_*` to switch the extraction model to a more permissive provider.
+  - During report generation: Use `REPORT_*` to switch the report model (the backend also auto-attempts safe-mode fallback, but the report will be more abstract).
+- **`HTTP 400: Not ready, please prepare first` on simulation start**:
+  - Step 3 now includes auto-prepare; if this still occurs, confirm you're running the `MiroFishPro` backend (port 5001).
+- **`interview_agents ... env not running or closed`**:
+  - The interview tool requires the simulation environment to still be running. Don't close the environment prematurely (or restart the simulation first).
+- **Interview `HTTP 400/504` timeout in Step 5**:
+  - IPC received no response from the simulation process; the current version auto-falls back to persona + graph/vector retrieval.
+- **Duplicate nodes with the same name in the graph**:
+  - Caused by "type jitter"; this version normalizes Person/Organization/Product/Location types — requires **rebuilding the graph** to take effect.
+- **Token dashboard showing 0**:
+  - Ensure `usage.json` exists in the corresponding Simulation directory — it is auto-created for new projects. Delete the file to reset billing data.
 
 ## 📄 Acknowledgments
 
@@ -139,12 +281,6 @@ npm run frontend  # Start frontend only
 
 MiroFish's core simulation engine is powered by **[OASIS (Open Agent Social Interaction Simulations)](https://github.com/camel-ai/oasis)**. OASIS is a high-performance social media simulation framework developed by the [CAMEL-AI](https://github.com/camel-ai) team, supporting million-scale agent interaction simulations, providing a solid technical foundation for MiroFish's swarm intelligence emergence. We sincerely thank the CAMEL-AI team for their open-source contributions!
 
-## 📈 Project Statistics
+## License
 
-<a href="https://www.star-history.com/#666ghj/MiroFish&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=666ghj/MiroFish&type=date&legend=top-left" />
- </picture>
-</a>
+Follows the upstream MiroFish open-source license (see `LICENSE` in the repository root).
