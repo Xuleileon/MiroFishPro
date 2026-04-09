@@ -16,4 +16,4 @@ COPY . .
 
 EXPOSE 3000 5001
 
-CMD ["npm", "run", "dev"]
+CMD ["npx", "concurrently", "-n", "backend,frontend", "-c", "yellow,cyan", "npm run backend", "npm run frontend"]
