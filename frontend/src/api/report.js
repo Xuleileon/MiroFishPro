@@ -74,6 +74,6 @@ export const checkReportStatus = (simulationId) => {
  * @param {string} reportId
  */
 export const getReportDownloadUrl = (reportId) => {
-  const base = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001'
+  const base = import.meta.env.VITE_API_BASE_URL || ''
   return `${base}/api/report/${reportId}/download`
 }

@@ -14,6 +14,7 @@ RUN cd backend && uv sync --frozen \
     && uv pip uninstall --python .venv nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 nvidia-cusparse-cu12 nvidia-cusparselt-cu12 nvidia-nccl-cu12 nvidia-nvjitlink-cu12 nvidia-nvtx-cu12 nvidia-nvshmem-cu12 nvidia-cufile-cu12 triton 2>/dev/null; true
 
 COPY . .
+ENV VITE_API_BASE_URL=""
 RUN cd frontend && npm run build
 
 FROM python:3.11-slim
