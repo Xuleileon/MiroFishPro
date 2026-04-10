@@ -113,16 +113,16 @@ class QdrantChunkStore:
         if graph_id:
             must.append(qmodels.FieldCondition(key="graph_id", match=qmodels.MatchValue(value=graph_id)))
 
-        results = self._client.search(
+        response = self._client.query_points(
             collection_name=self._collection,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             query_filter=qmodels.Filter(must=must) if must else None,
             with_payload=True,
         )
 
         items: List[Dict[str, Any]] = []
-        for r in results:
+        for r in response.points:
             payload = r.payload or {}
             items.append(
                 {
