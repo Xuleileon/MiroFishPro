@@ -23,4 +23,4 @@ WORKDIR /app
 COPY --from=builder /app /app
 
 EXPOSE 5001
-CMD ["sh", "-c", "cd backend && uv run python run_prod.py"]
+CMD ["sh", "-c", "cd backend && .venv/bin/python run_prod.py"]
